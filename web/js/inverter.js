@@ -396,12 +396,16 @@ export function createInverter(root, api) {
     if (kind === "DC" && S.mode !== "3P") kind = "RUN";
     if (kind === "AUDIO" && S.mode !== "1P") kind = "RUN";
     const pos = aud.playing && aud.pcm ? ((aud.sent - aud.fill) % aud.pcm.length + aud.pcm.length) % aud.pcm.length / aud.pcm.length : -1;
+    // 運転中はデバイスの実際の値 (ランプ途中を含む)、それ以外は設定値
+    const running = live && st === "RUN" && +dev.f > 0.5;
+    let m = kind === "DC" ? S.dcM : kind === "AUDIO" ? S.audM : S.m;
+    if (running || (live && (st === "DC" || st === "AUDIO"))) m = +dev.m;
     return {
-      mode: S.mode, c: calc(), f: S.f, rev: S.dir === "REV", vbus: S.vbus,
-      m: kind === "DC" ? S.dcM : kind === "AUDIO" ? S.audM : S.m,
-      kind, theta: (kind === "DC" ? (live ? +dev.theta : S.dcDeg) : 0) * Math.PI / 180,
+      mode: S.mode, c: live && dev.fc ? calcInverter(+dev.fc) : calc(), f: running ? +dev.f : S.f,
+      rev: S.dir === "REV", vbus: S.vbus, m, kind,
+      theta: (kind === "DC" ? (live ? +dev.theta : S.dcDeg) : 0) * Math.PI / 180,
       active: live && st !== "IDLE",
-      audio: aud.pcm ? { name: aud.name, fs: aud.fs, bw: aud.bw, dur: aud.dur, env: aud.env, pos } : null,
+      audio: aud.pcm ? { name: aud.name, fs: aud.fs, bw: aud.bw, dur: aud.dur, env: aud.env, pos, pcm: aud.pcm } : null,
     };
   }
 

@@ -3,164 +3,272 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<meta name="theme-color" content="#0d1117">
+<meta name="theme-color" content="#1b1c1f">
 <title>RP2040 FuncGen</title>
 <link rel="manifest" href="manifest.webmanifest">
 <link rel="icon" href="icons/icon.svg" type="image/svg+xml">
 <link rel="apple-touch-icon" href="icons/icon-192.png">
 <style>
   :root {
-    --bg: #0d1117; --card: #161b22; --card2: #1c222b; --line: #2d3540;
-    --text: #e6edf3; --dim: #8b96a3; --accent: #58a6ff;
-    --ch1: #f2cc60; --ch2: #56c8f5; --ok: #3fb950; --err: #f85149; --inv: #f0883e;
-    --radius: 12px;
+    --bezel: #1b1c1f; --bezel2: #26282c; --panel: #2e3035; --line: #3d4046; --well: #121315;
+    --text: #e6e7e9; --dim: #9a9ea6; --accent: #4aa8ff;
+    --c1: #f4e21c; --c2: #3fe35a; --c3: #4aa8ff; --c4: #ff5f8f; --cm: #c27dff;
+    --run: #31d158; --stop: #ff453a; --trig: #ff9b21; --inv: #ff9b21; --ok: #31d158; --err: #ff453a;
+    --ch1: var(--c1); --ch2: var(--c2);
+    --btn-r: 0;   /* ボタン類の角 (0 = 角を立てる) */
   }
   * { box-sizing: border-box; }
-  html, body { margin: 0; background: var(--bg); color: var(--text);
-    font: 14px/1.4 system-ui, "Yu Gothic UI", "Noto Sans JP", sans-serif; }
+  html, body { margin: 0; background: var(--bezel); color: var(--text);
+    font: 13px/1.35 system-ui, "Segoe UI", "Yu Gothic UI", "Noto Sans JP", sans-serif; }
   body { padding-bottom: env(safe-area-inset-bottom); }
   button, input, select { font: inherit; color: inherit; }
+  [hidden] { display: none !important; }
+  .mono { font-family: ui-monospace, Consolas, "Roboto Mono", monospace; }
 
   /* ---------- header ---------- */
-  header { position: sticky; top: 0; z-index: 10; display: flex; align-items: center; gap: 10px;
-    padding: 10px 16px; padding-top: max(10px, env(safe-area-inset-top));
-    background: rgba(13,17,23,.92); backdrop-filter: blur(8px); border-bottom: 1px solid var(--line); }
-  header h1 { font-size: 16px; margin: 0; font-weight: 700; letter-spacing: .02em; }
-  header h1 small { color: var(--dim); font-weight: 400; margin-left: 4px; }
+  header { display: flex; align-items: center; gap: 10px; padding: 6px 14px;
+    padding-top: max(6px, env(safe-area-inset-top)); background: linear-gradient(#2a2c31, #1f2024);
+    border-bottom: 1px solid #000; }
+  .brand { font-weight: 800; letter-spacing: .04em; font-size: 15px; }
+  .brand small { font-weight: 400; color: var(--dim); letter-spacing: 0; margin-left: 6px; font-size: 11px; }
   .spacer { flex: 1; }
-  .pill { display: inline-flex; align-items: center; gap: 6px; padding: 4px 10px; border-radius: 99px;
-    background: var(--card2); color: var(--dim); font-size: 12px; white-space: nowrap; }
-  .pill::before { content: ""; width: 8px; height: 8px; border-radius: 50%; background: var(--dim); }
+  .pill { display: inline-flex; align-items: center; gap: 6px; padding: 3px 10px; border-radius: 99px;
+    background: var(--well); color: var(--dim); font-size: 12px; white-space: nowrap; border: 1px solid var(--line); }
+  .pill::before { content: ""; width: 8px; height: 8px; border-radius: 50%; background: #555; }
   .pill.on { color: var(--ok); } .pill.on::before { background: var(--ok); box-shadow: 0 0 6px var(--ok); }
-  .btn { border: 1px solid var(--line); background: var(--card2); border-radius: 8px; padding: 7px 14px;
-    cursor: pointer; white-space: nowrap; }
-  .btn:hover { border-color: var(--accent); }
-  .btn.primary { background: var(--accent); border-color: var(--accent); color: #0d1117; font-weight: 700; }
-
-  /* ---------- layout ---------- */
-  .layout { display: grid; gap: 12px; padding: 12px 16px; max-width: 1400px; margin: 0 auto;
-    grid-template-columns: minmax(340px, 420px) 1fr; grid-template-areas: "ctrl scope"; }
-  .controls { grid-area: ctrl; display: flex; flex-direction: column; gap: 12px; min-width: 0; }
-  .scope { grid-area: scope; position: sticky; top: 64px; align-self: start;
-    height: calc(100vh - 88px); display: flex; flex-direction: column; min-width: 0; }
-  @media (max-width: 860px) {
-    .layout { grid-template-columns: 1fr; grid-template-areas: "scope" "ctrl"; padding: 8px 10px; gap: 10px; }
-    .scope { top: 52px; height: 46vh; min-height: 300px; z-index: 5; }
-    header { padding: 8px 10px; }
-  }
-
-  .card { background: var(--card); border: 1px solid var(--line); border-radius: var(--radius); padding: 12px 14px; }
-  .card h2 { margin: 0 0 10px; font-size: 14px; display: flex; align-items: center; gap: 8px; }
-  .card h2 .tag { font-size: 11px; font-weight: 400; color: var(--dim); }
-  .card h2 .dot { width: 10px; height: 10px; border-radius: 3px; }
-
-  /* ---------- scope ---------- */
-  .scope.card { padding: 8px; }
-  #scope { flex: 1; width: 100%; min-height: 0; border-radius: 8px; background: #0d1117; display: block; }
-  .scope-opts { display: flex; flex-wrap: wrap; gap: 6px 12px; align-items: center; padding: 8px 4px 2px; font-size: 12px; color: var(--dim); }
-  .scope-opts input[type=number] { width: 72px; }
-  @media (max-width: 860px) { .scope-opts { display: none; } }
-
-  /* ---------- controls ---------- */
-  .row { display: flex; align-items: center; gap: 8px; margin-top: 6px; }
-  .row label.name { width: 84px; color: var(--dim); flex: none; }
-  input[type=number], select { background: var(--bg); border: 1px solid var(--line); border-radius: 8px;
-    padding: 6px 8px; min-width: 0; }
-  input[type=number] { width: 110px; text-align: right; }
-  input[type=number]:focus, select:focus { outline: none; border-color: var(--accent); }
-  input[type=range] { width: 100%; margin: 8px 0 2px; accent-color: var(--accent); height: 28px; }
-  .ch1 input[type=range] { accent-color: var(--ch1); }
-  .ch2 input[type=range] { accent-color: var(--ch2); }
-  .unit { color: var(--dim); }
-  .chips { display: flex; flex-wrap: wrap; gap: 6px; margin: 4px 0 2px; }
-  .chip { border: 1px solid var(--line); background: var(--card2); border-radius: 99px; padding: 3px 10px;
-    font-size: 12px; cursor: pointer; }
-  .chip:hover { border-color: var(--accent); }
-  .seg { display: grid; grid-template-columns: repeat(4, 1fr); gap: 4px; background: var(--bg);
-    border: 1px solid var(--line); border-radius: 10px; padding: 3px; }
-  .seg button { border: 0; background: transparent; border-radius: 7px; padding: 6px 0; cursor: pointer; color: var(--dim); }
-  .seg button.sel { background: var(--card2); color: var(--text); box-shadow: inset 0 0 0 1px var(--ch2); }
-  .seg.two { grid-template-columns: repeat(2, 1fr); flex: 1; }
-  .seg button:disabled { opacity: .45; cursor: not-allowed; }
-
-  /* ---------- inverter ---------- */
-  .inv h3 { font-size: 13px; margin: 16px 0 4px; padding-top: 10px; border-top: 1px solid var(--line); }
-  .inv h3 .tag, .inv h2 .tag { font-size: 11px; font-weight: 400; color: var(--dim); }
-  .inv .seg button.sel { box-shadow: inset 0 0 0 1px var(--inv); }
-  .inv input[type=range] { accent-color: var(--inv); }
-  .inv-state { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; }
   .pill.warn { color: var(--inv); } .pill.warn::before { background: var(--inv); box-shadow: 0 0 6px var(--inv); }
   .pill.bad { color: var(--err); } .pill.bad::before { background: var(--err); }
-  .inv-fault { background: rgba(248,81,73,.15); border: 1px solid var(--err); color: #ffb3ad;
-    border-radius: 8px; padding: 8px 10px; margin-bottom: 8px; font-size: 13px; }
-  .inv-btns { display: flex; gap: 8px; margin-top: 10px; }
-  .inv-btns .btn { flex: 1; }
-  .btn.big { padding: 11px 14px; font-weight: 700; }
-  .btn.ok { border-color: var(--inv); color: var(--inv); }
-  .btn.danger { background: #8e1f1a; border-color: var(--err); color: #fff; }
-  .btn:disabled { opacity: .4; cursor: not-allowed; }
-  .inv-err { color: var(--err); font-size: 12px; min-height: 1em; margin-top: 4px; }
-  .inv .row input[type=number] { width: 110px; }
-  .check { display: flex; gap: 6px; align-items: center; margin-top: 8px; color: var(--dim); font-size: 12px; }
-  .meter { height: 6px; background: var(--bg); border-radius: 3px; margin-top: 8px; overflow: hidden; }
-  .meter span { display: block; height: 100%; width: 0; background: var(--inv); transition: width .1s; }
-  details.sub { margin-top: 12px; } details.sub summary { color: var(--dim); font-size: 12px; cursor: pointer; }
-  [hidden] { display: none !important; }
-  .controls.inv-first #inv-card { order: -1; }
 
-  .tabs { display: flex; gap: 4px; padding: 0 0 6px; }
-  .tabs button { border: 1px solid var(--line); background: var(--bg); color: var(--dim); border-radius: 8px;
-    padding: 4px 12px; font-size: 12px; cursor: pointer; }
-  .tabs button.sel { color: var(--text); border-color: var(--accent); }
+  /* ---------- hardware-like keys ---------- */
+  .key { position: relative; border: 1px solid #0b0b0c; border-radius: var(--btn-r); padding: 7px 10px; min-height: 34px;
+    background: linear-gradient(#4a4d53, #383a3f); color: #f2f2f2; cursor: pointer; white-space: nowrap;
+    box-shadow: inset 0 1px 0 rgba(255,255,255,.12), 0 1px 2px rgba(0,0,0,.6); font-weight: 600; }
+  .key:hover { background: linear-gradient(#55585f, #404247); }
+  .key:active { transform: translateY(1px); }
+  .key:disabled { opacity: .35; cursor: not-allowed; }
+  .key small { display: block; font-weight: 400; font-size: 10px; color: var(--dim); }
+  .key.lit { box-shadow: inset 0 0 0 2px var(--lc, var(--accent)), 0 0 10px -2px var(--lc, var(--accent)); color: var(--lc, #fff); }
+  .key.round { border-radius: var(--btn-r); width: 40px; height: 40px; padding: 0; min-height: 0; }
+  .key.primary { background: linear-gradient(#3c8de0, #2a6fb8); }
 
+  /* ---------- instrument layout ---------- */
+  .inst { display: grid; grid-template-columns: minmax(0, 1fr) 380px; gap: 10px; padding: 10px;
+    height: calc(100vh - 46px); min-height: 560px; }
+  .display { display: flex; flex-direction: column; min-width: 0; min-height: 0; background: var(--bezel2);
+    border-radius: 10px; padding: 8px; border: 1px solid #000; box-shadow: inset 0 1px 0 rgba(255,255,255,.05); }
+  .statusbar { display: flex; flex-wrap: wrap; gap: 1px; background: #000; border: 1px solid #333; border-bottom: 0;
+    font: 12px/1 ui-monospace, Consolas, monospace; }
+  .sb { padding: 5px 8px; background: #0c0c0c; white-space: nowrap; display: flex; align-items: center; gap: 5px; }
+  .sb .tag { display: inline-block; min-width: 16px; padding: 1px 3px; text-align: center; color: #000;
+    font-weight: 800; border-radius: 2px; }
+  .sb.grow { flex: 1; }
+  .sb.run { font-weight: 800; color: var(--run); } .sb.stop { font-weight: 800; color: var(--stop); }
+  .sb .lbl { color: var(--dim); }
+  .screen-row { flex: 1; display: grid; grid-template-columns: minmax(0, 1fr) 210px; min-height: 0;
+    border: 1px solid #333; background: #000; }
+  .screen { position: relative; min-width: 0; min-height: 0; }
+  #scope { position: absolute; inset: 0; width: 100%; height: 100%; display: block; touch-action: pan-y; }
+  .sidebar { border-left: 1px solid #333; background: #050505; overflow: auto; font-size: 12px; }
+  .sb-sec { padding: 6px 8px; border-bottom: 1px solid #222; }
+  .sb-h { color: var(--dim); font-size: 11px; text-transform: uppercase; letter-spacing: .06em; margin-bottom: 4px; }
+  .m-row { display: grid; grid-template-columns: auto 1fr auto; gap: 6px; align-items: baseline; padding: 2px 0; }
+  .m-tag { color: #000; font-weight: 800; padding: 0 4px; border-radius: 2px; font-size: 11px; }
+  .m-name { color: var(--dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .m-val { font-family: ui-monospace, Consolas, monospace; color: #fff; }
+  .m-stat { grid-column: 1 / -1; color: #777; font: 10px ui-monospace, Consolas, monospace; margin-top: -1px; }
+  .c-row { display: flex; justify-content: space-between; font-family: ui-monospace, Consolas, monospace; padding: 1px 0; }
+  .c-row span:first-child { color: var(--trig); }
+  .softkeys { display: grid; grid-template-columns: 110px repeat(6, minmax(0, 1fr)); gap: 6px; padding-top: 8px; }
+  .sk-title { align-self: center; color: var(--dim); font-size: 11px; text-transform: uppercase; letter-spacing: .05em;
+    overflow: hidden; text-overflow: ellipsis; }
+  .softkey { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 2px; min-height: 46px;
+    border: 1px solid #0b0b0c; border-radius: var(--btn-r); background: linear-gradient(#5b5e64, #44464b); cursor: pointer;
+    box-shadow: inset 0 1px 0 rgba(255,255,255,.15); padding: 4px; min-width: 0; }
+  .softkey:hover:not(:disabled) { background: linear-gradient(#686b72, #4d5055); }
+  .softkey.empty { background: #2a2c30; box-shadow: none; cursor: default; }
+  .softkey:disabled:not(.empty) { opacity: .4; }
+  .softkey.lit { box-shadow: inset 0 0 0 2px var(--c, var(--accent)); }
+  .sk-l { font-size: 11px; color: #d0d3d8; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 100%; }
+  .sk-v { font-size: 13px; font-weight: 700; color: var(--c, #fff); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 100%; }
+
+  /* ---------- front panel ---------- */
+  .panel { display: flex; flex-direction: column; gap: 10px; min-height: 0; overflow: auto; }
+  .front { background: linear-gradient(#303237, #26282c); border-radius: 10px; padding: 10px; border: 1px solid #000;
+    display: grid; grid-template-columns: 1fr 1fr; gap: 10px 10px; }
+  .grp { display: flex; flex-wrap: wrap; gap: 6px; align-content: flex-start; position: relative; padding-top: 14px; }
+  .grp.wide { grid-column: 1 / -1; }
+  .silk { position: absolute; top: 0; left: 0; font-size: 9px; letter-spacing: .14em; color: #8d9199; text-transform: uppercase; }
+  .grp .key { flex: 1; }
+  .key.ch { flex: 0 0 auto; width: 40px; height: 34px; padding: 0; font-weight: 800; }
+  .key.ch[data-ch="1"] { --lc: var(--c1); } .key.ch[data-ch="2"] { --lc: var(--c2); }
+  .key.ch[data-ch="3"] { --lc: var(--c3); } .key.ch[data-ch="4"] { --lc: var(--c4); } .key.ch[data-ch="M"] { --lc: var(--cm); }
+  .key.run { --lc: var(--run); } .key.run.stopped { --lc: var(--stop); }
+
+  /* ---------- parameter panels ---------- */
+  .card { background: var(--panel); border: 1px solid #000; border-radius: 10px; padding: 12px 14px;
+    box-shadow: inset 0 1px 0 rgba(255,255,255,.05); }
+  .card h2 { margin: 0 0 10px; font-size: 14px; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+  .card h2 .tag, .card h3 .tag { font-size: 11px; font-weight: 400; color: var(--dim); }
+  .card h2 .dot { width: 10px; height: 10px; border-radius: 2px; }
+  .row { display: flex; align-items: center; gap: 8px; margin-top: 6px; }
+  .row label.name { width: 84px; color: var(--dim); flex: none; }
+  input[type=number], select { background: var(--well); border: 1px solid var(--line); border-radius: 6px;
+    padding: 6px 8px; min-width: 0; font-family: ui-monospace, Consolas, monospace; }
+  input[type=number] { width: 110px; text-align: right; }
+  input[type=number]:focus, select:focus { outline: none; border-color: var(--accent); }
+  input[type=range] { width: 100%; margin: 8px 0 2px; accent-color: var(--accent); height: 26px; }
+  .ch1 input[type=range] { accent-color: var(--c1); } .ch2 input[type=range] { accent-color: var(--c2); }
+  .unit { color: var(--dim); }
+  .chips { display: flex; flex-wrap: wrap; gap: 6px; margin: 4px 0 2px; }
+  .chip { border: 1px solid #0b0b0c; background: linear-gradient(#4a4d53, #3a3c41); border-radius: var(--btn-r); padding: 3px 9px;
+    font-size: 12px; cursor: pointer; }
+  .chip:hover { filter: brightness(1.15); }
+  .seg { display: grid; grid-template-columns: repeat(4, 1fr); gap: 4px; background: var(--well);
+    border: 1px solid var(--line); border-radius: var(--btn-r); padding: 3px; }
+  .seg button { border: 0; background: transparent; border-radius: var(--btn-r); padding: 6px 0; cursor: pointer; color: var(--dim); }
+  .seg button.sel { background: #44474d; color: var(--text); box-shadow: inset 0 0 0 1px var(--c2); }
+  .seg.two { grid-template-columns: repeat(2, 1fr); flex: 1; }
+  .seg button:disabled { opacity: .45; cursor: not-allowed; }
   .out { display: flex; align-items: center; gap: 12px; margin-top: 12px; padding-top: 10px; border-top: 1px solid var(--line); }
-  .switch { position: relative; width: 52px; height: 30px; flex: none; }
+  .switch { position: relative; width: 52px; height: 28px; flex: none; }
   .switch input { opacity: 0; width: 0; height: 0; }
-  .switch span { position: absolute; inset: 0; background: var(--card2); border: 1px solid var(--line);
-    border-radius: 99px; transition: .15s; cursor: pointer; }
-  .switch span::before { content: ""; position: absolute; width: 22px; height: 22px; left: 3px; top: 3px;
-    border-radius: 50%; background: var(--dim); transition: .15s; }
-  .switch input:checked + span { background: var(--ok); border-color: var(--ok); }
-  .switch input:checked + span::before { transform: translateX(22px); background: #fff; }
+  .switch span { position: absolute; inset: 0; background: var(--well); border: 1px solid var(--line);
+    border-radius: var(--btn-r); transition: .15s; cursor: pointer; }
+  .switch span::before { content: "OFF"; position: absolute; inset: 3px auto 3px 3px; width: 26px; border-radius: var(--btn-r);
+    background: #55585e; font-size: 9px; font-weight: 800; display: grid; place-items: center; transition: .15s; color: #ccc; }
+  .switch input:checked + span { border-color: var(--ok); box-shadow: 0 0 8px -2px var(--ok); }
+  .switch input:checked + span::before { content: "ON"; transform: translateX(20px); background: var(--ok); color: #000; }
   .switch input:disabled + span { opacity: .4; cursor: not-allowed; }
   .info { font-size: 12px; color: var(--dim); font-family: ui-monospace, Consolas, monospace; overflow-wrap: anywhere; }
   .info.active { color: var(--text); }
   .note { font-size: 11px; color: var(--dim); margin: 8px 0 0; }
-
-  details.card summary { cursor: pointer; color: var(--dim); }
-  #log { margin-top: 8px; height: 160px; overflow: auto; font: 11px/1.45 ui-monospace, Consolas, monospace;
-    background: var(--bg); border-radius: 8px; padding: 6px 8px; white-space: pre-wrap; }
+  .settings { display: flex; flex-wrap: wrap; gap: 8px 14px; align-items: center; font-size: 12px; color: var(--dim); }
+  #log { margin-top: 8px; height: 220px; overflow: auto; font: 11px/1.45 ui-monospace, Consolas, monospace;
+    background: var(--well); border-radius: 6px; padding: 6px 8px; white-space: pre-wrap; }
   #log .tx { color: var(--accent); } #log .rx { color: var(--text); } #log .er { color: var(--err); }
-  .settings { display: flex; flex-wrap: wrap; gap: 8px 14px; align-items: center; margin-top: 10px; font-size: 12px; color: var(--dim); }
-  .mobile-sim { display: none; }
-  @media (max-width: 860px) { .mobile-sim { display: block; } }
+
+  /* ---------- inverter card ---------- */
+  .inv h3 { font-size: 13px; margin: 16px 0 4px; padding-top: 10px; border-top: 1px solid var(--line); }
+  .inv .seg button.sel { box-shadow: inset 0 0 0 1px var(--inv); }
+  .inv input[type=range] { accent-color: var(--inv); }
+  .inv-state { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; flex-wrap: wrap; }
+  .inv-fault { background: rgba(255,69,58,.15); border: 1px solid var(--err); color: #ffb3ad;
+    border-radius: 6px; padding: 8px 10px; margin-bottom: 8px; font-size: 13px; }
+  .inv-btns { display: flex; gap: 8px; margin-top: 10px; }
+  .inv-btns .btn { flex: 1; }
+  .btn { border: 1px solid #0b0b0c; background: linear-gradient(#4a4d53, #383a3f); border-radius: var(--btn-r); padding: 8px 12px;
+    cursor: pointer; white-space: nowrap; box-shadow: inset 0 1px 0 rgba(255,255,255,.12); font-weight: 600; }
+  .btn:hover { filter: brightness(1.12); }
+  .btn.big { padding: 11px 14px; font-weight: 800; }
+  .btn.ok { color: var(--inv); box-shadow: inset 0 0 0 1px var(--inv); }
+  .btn.danger { background: linear-gradient(#b3261e, #8a1c16); color: #fff; }
+  .btn:disabled { opacity: .4; cursor: not-allowed; filter: none; }
+  .inv-err { color: var(--err); font-size: 12px; min-height: 1em; margin-top: 4px; }
+  .check { display: flex; gap: 6px; align-items: center; margin-top: 8px; color: var(--dim); font-size: 12px; }
+  .meter { height: 6px; background: var(--well); border-radius: 3px; margin-top: 8px; overflow: hidden; }
+  .meter span { display: block; height: 100%; width: 0; background: var(--inv); transition: width .1s; }
+  details.sub { margin-top: 12px; } details.sub summary { color: var(--dim); font-size: 12px; cursor: pointer; }
+
+  /* ---------- popup ---------- */
+  .popup { position: fixed; z-index: 60; background: #2b2d31; border: 1px solid #000; border-radius: 6px;
+    box-shadow: 0 8px 30px rgba(0,0,0,.6); padding: 4px; max-height: 60vh; overflow: auto; }
+  .pop-title { color: var(--dim); font-size: 11px; padding: 4px 8px 6px; text-transform: uppercase; letter-spacing: .05em; }
+  .pop-item { display: block; width: 100%; text-align: left; border: 0; background: transparent; padding: 8px 10px;
+    border-radius: var(--btn-r); cursor: pointer; color: var(--c, var(--text)); }
+  .pop-item:hover { background: #3a3c41; }
+  .pop-item.sel { background: #44474d; font-weight: 700; }
+  .pop-item.sel::before { content: "● "; }
+  .pop-num { display: flex; gap: 6px; align-items: center; padding: 4px 6px 8px; }
+  .pop-num input { width: 100%; flex: 1; }
+  .pop-step { width: 38px; height: 34px; border: 1px solid #0b0b0c; border-radius: var(--btn-r); background: linear-gradient(#5b5e64, #44464b); cursor: pointer; font-weight: 800; }
 
   #toast { position: fixed; left: 50%; bottom: calc(20px + env(safe-area-inset-bottom)); transform: translateX(-50%);
-    background: var(--card2); border: 1px solid var(--line); padding: 10px 16px; border-radius: 10px;
-    max-width: calc(100% - 32px); opacity: 0; pointer-events: none; transition: opacity .2s; z-index: 50; }
-  #toast.show { opacity: 1; } #toast.err { border-color: var(--err); }
+    background: #2b2d31; border: 1px solid #000; padding: 10px 16px; border-radius: 8px;
+    max-width: calc(100% - 32px); opacity: 0; pointer-events: none; transition: opacity .2s; z-index: 70; }
+  #toast.show { opacity: 1; } #toast.err { border-color: var(--err); color: #ffb3ad; }
+
+  /* ---------- phone ---------- */
+  @media (max-width: 860px) {
+    header { padding: 6px 10px; }
+    .inst { display: block; height: auto; padding: 6px; }
+    .display { position: sticky; top: 0; z-index: 20; border-radius: 0 0 10px 10px; padding: 6px; margin: -6px -6px 8px; }
+    .statusbar { font-size: 10px; }
+    .sb { padding: 3px 5px; }
+    .screen-row { display: flex; flex-direction: column; height: 46vh; min-height: 280px; }
+    .screen { flex: 1; }
+    .sidebar { display: flex; gap: 0; overflow-x: auto; overflow-y: hidden; border-left: 0; border-top: 1px solid #333;
+      max-height: 64px; flex: none; }
+    .sb-sec { border-bottom: 0; border-right: 1px solid #222; padding: 4px 6px; flex: none; }
+    .sb-sec .sb-h { display: none; }
+    .sb-sec .m-row { grid-template-columns: auto auto; gap: 4px; padding: 0; }
+    .sb-sec .m-name { display: none; }
+    .m-list { display: grid; grid-auto-flow: column; grid-template-rows: repeat(2, auto); gap: 2px 10px; }
+    .m-stat { display: none; }
+    .softkeys { grid-template-columns: repeat(3, 1fr); gap: 4px; padding-top: 6px; }
+    .sk-title { display: none; }
+    .softkey { min-height: 40px; }
+    .panel { overflow: visible; }
+    .front { display: flex; overflow-x: auto; gap: 12px; padding: 8px; border-radius: 8px; }
+    .grp { flex-wrap: nowrap; flex: none; }
+    .grp .key { flex: none; }
+    .popup.sheet { left: 0 !important; right: 0; bottom: 0; top: auto !important; width: auto !important;
+      border-radius: 12px 12px 0 0; padding-bottom: calc(8px + env(safe-area-inset-bottom)); }
+  }
 </style>
 </head>
 <body>
 <header>
-  <h1>FuncGen<small>RP2040</small></h1>
+  <div class="brand">FuncGen<small>RP2040 信号源 / インバータ</small></div>
   <span class="spacer"></span>
   <span id="status" class="pill">未接続</span>
-  <button id="connect" class="btn primary">接続</button>
+  <button id="connect" class="key primary">接続</button>
 </header>
 
-<main class="layout">
-  <!-- ===== simulation ===== -->
-  <section class="scope card">
-    <div class="tabs"><button data-view="gen">信号源 CH1/CH2</button><button data-view="inv">インバータ</button></div>
-    <canvas id="scope"></canvas>
-    <div class="scope-opts sim-opts"></div>
+<main class="inst">
+  <!-- ===== display ===== -->
+  <section class="display">
+    <div class="statusbar" id="statusbar"></div>
+    <div class="screen-row">
+      <div class="screen"><canvas id="scope"></canvas></div>
+      <aside class="sidebar" id="sidebar"></aside>
+    </div>
+    <div class="softkeys" id="softkeys"></div>
   </section>
 
-  <section class="controls">
-    <!-- ===== CH1 ===== -->
-    <div class="card ch1">
-      <h2><span class="dot" style="background:var(--ch1)"></span>CH1 PWM <span class="tag">GPIO0 出力 / GPIO1 反転</span></h2>
+  <!-- ===== front panel + parameter panels ===== -->
+  <section class="panel">
+    <div class="front" id="front">
+      <div class="grp"><span class="silk">Run Control</span>
+        <button class="key run" data-key="run">Run/Stop</button>
+        <button class="key" data-key="auto">Auto Scale</button>
+      </div>
+      <div class="grp"><span class="silk">Vertical</span>
+        <button class="key ch" data-key="ch" data-ch="1">1</button>
+        <button class="key ch" data-key="ch" data-ch="2">2</button>
+        <button class="key ch" data-key="ch" data-ch="3">3</button>
+        <button class="key ch" data-key="ch" data-ch="4">4</button>
+        <button class="key ch" data-key="ch" data-ch="M">M</button>
+      </div>
+      <div class="grp"><span class="silk">Measure</span>
+        <button class="key" data-key="meas">測定</button>
+        <button class="key" data-key="cursor">カーソル</button>
+        <button class="key" data-key="fft">FFT</button>
+      </div>
+      <div class="grp"><span class="silk">Trigger · Display</span>
+        <button class="key" data-key="trig">トリガ</button>
+        <button class="key" data-key="disp">表示</button>
+        <button class="key" data-key="util">Utility</button>
+      </div>
+      <div class="grp wide"><span class="silk">Wave Gen · Inverter</span>
+        <button class="key gen" data-key="gen1">Gen1<small>PWM · GP0/1</small></button>
+        <button class="key gen" data-key="gen2">Gen2<small>波形 · GP2/3</small></button>
+        <button class="key gen" data-key="inv">Inverter<small>GP4/6/8</small></button>
+      </div>
+    </div>
+
+    <!-- CH1 -->
+    <div class="card ch1" data-panel="gen1">
+      <h2><span class="dot" style="background:var(--c1)"></span>Gen1 PWM <span class="tag">GP0 出力 / GP1 反転</span></h2>
       <div class="freq" data-ch="pwm"></div>
       <div class="pct" data-ch="pwm" data-key="duty" data-label="デューティー" data-step="0.1"
            data-chips="10,25,50,75,90"></div>
@@ -170,9 +278,9 @@
       </div>
     </div>
 
-    <!-- ===== CH2 ===== -->
-    <div class="card ch2">
-      <h2><span class="dot" style="background:var(--ch2)"></span>CH2 波形 <span class="tag">試験的 · GPIO2 + / GPIO3 − 差動</span></h2>
+    <!-- CH2 -->
+    <div class="card ch2" data-panel="gen2">
+      <h2><span class="dot" style="background:var(--c2)"></span>Gen2 波形 <span class="tag">試験的 · GP2 + / GP3 − 差動</span></h2>
       <div class="seg" id="wave-type">
         <button data-v="SINE">正弦</button><button data-v="TRI">三角</button>
         <button data-v="SAW">のこぎり</button><button data-v="SQR">矩形</button>
@@ -184,19 +292,15 @@
         <label class="switch"><input type="checkbox" id="wave-on" disabled><span></span></label>
         <div id="wave-info" class="info">未接続</div>
       </div>
-      <p class="note">※ 各ピンに RC ローパス (例 1kΩ + 10nF, fc≈16kHz) を付けて (+) − (−) を測定。キャリア約390kHz / 9bit。</p>
+      <p class="note">※ 各ピンに RC ローパス (例 1kΩ + 10nF, fc≈16kHz) を付けて (+) − (−) を測定。キャリア約390kHz / 9bit。表示のプローブ設定は CH2〜4 キーのメニューで変更できます。</p>
     </div>
 
-    <!-- ===== inverter ===== -->
-    <div class="card inv" id="inv-card"></div>
+    <!-- inverter -->
+    <div class="card inv" id="inv-card" data-panel="inv"></div>
 
-    <!-- ===== settings / log ===== -->
-    <details class="card mobile-sim">
-      <summary>シミュレーション設定</summary>
-      <div class="settings sim-opts"></div>
-    </details>
-    <details class="card">
-      <summary>ログ・接続設定</summary>
+    <!-- utility -->
+    <div class="card" data-panel="util">
+      <h2>Utility <span class="tag">接続設定・通信ログ</span></h2>
       <div class="settings">
         <label>接続方式
           <select id="method">
@@ -208,9 +312,10 @@
         <span id="support"></span>
       </div>
       <div id="log"></div>
-    </details>
+    </div>
   </section>
 </main>
+<div id="popup" class="popup" hidden></div>
 <div id="toast"></div>
 
 <template id="tpl-freq">
@@ -228,16 +333,6 @@
   </div>
   <input type="range" class="range" min="0" max="100">
   <div class="chips"></div>
-</template>
-<template id="tpl-sim">
-  <label><input type="radio" name="simmode" value="rc"> RCフィルタ後</label>
-  <label><input type="radio" name="simmode" value="ideal"> 理想 (PWM平均)</label>
-  <label>R <input type="number" class="sim-r" min="0" step="any"> Ω</label>
-  <label>C <input type="number" class="sim-c" min="0" step="any"> nF</label>
-  <label><input type="checkbox" data-show="b"> CH1 反転</label>
-  <label><input type="checkbox" data-show="p"> CH2 +</label>
-  <label><input type="checkbox" data-show="n"> CH2 −</label>
-  <label><input type="checkbox" data-show="diff"> 差動</label>
 </template>
 
 <script type="module" src="js/app.js"></script>

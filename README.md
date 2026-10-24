@@ -1,8 +1,28 @@
 # picofunc — YD-RP2040 簡易ファンクションジェネレータ / インバータ信号源
 
 - ファームウェア: `src/`（PlatformIO, arduino-pico, 200 MHz）
-- 操作 UI（PC / Android）: `web/` → https://arobberwhothreatenswithpunch.github.io/picofunc/
-- 旧 PC 版 GUI（CH1 / CH2 のみ）: `pc/fgen_gui.py`（`fgen_gui.bat` で起動）
+- 操作 UI（PC / Android 共通の Web アプリ）: `web/` → https://arobberwhothreatenswithpunch.github.io/picofunc/
+- PC アプリ: **`fgen_gui.bat` をダブルクリック** → `pc/launch_web.py` が `web/` を `http://127.0.0.1:8765/` で配信し、
+  Chrome（なければ Edge）のアプリ窓で開く。窓を閉じるとサーバーも終了する。必要なのは Python 3 のみ（追加パッケージ不要）
+- 旧 PC 版 GUI（tkinter、CH1 / CH2 のみ）: `python pc/fgen_gui.py`（pyserial が必要）
+
+## 操作画面（オシロ風）
+- 上部ステータスバー: 表示中チャンネルの V/div、時間軸（自動: トリガソースが 3 周期以上入る）、トリガ状態、Run / Stop
+- 前面パネル: Run/Stop・Auto Scale、チャンネル 1〜4・M（押すとメニュー、もう一度で非表示）、
+  測定・カーソル・FFT・トリガ・表示・Utility、信号発生 Gen1 / Gen2 / Inverter（押すと設定パネルとメニューを切替）
+- ソフトキー（画面下 6 個）: 押したキーのメニュー。▼ の項目は選択肢、数値はポップアップで入力
+- 表示は、ファームウェアと同じ計算によるシミュレーション（実測ではない）
+
+| 表示モード | 1 黄 | 2 緑 | 3 青 | 4 桃 | M 紫 |
+|---|---|---|---|---|---|
+| 信号源（Gen1 / Gen2） | GP0 PWM | CH2 差動 | GP2 (+) | GP3 (−) | — |
+| インバータ 3 相 | U | V | W | — | 線間 U−V（V−W・W−U も表示可） |
+| インバータ 単相 | A | B | — | — | A−B |
+
+- インバータは「平均（RC 後）」と「スイッチング波形」を切り替えられる（FFT でキャリアの側波帯を見るときはスイッチング）
+- 自動測定（最大 8 個）: 周波数・周期・デューティ・パルス幅・Vpp・最大/最小・平均・実効値・位相差。統計（平均/最小/最大）表示あり
+- カーソル: X（Δt・1/Δt）、Y（ΔV）。画面をドラッグして移動
+- FFT: 65536 点、窓関数 Hann / 矩形 / Flat top / Blackman-Harris、スパン切替、上位 5 ピーク表示（dBV、1 Vrms = 0 dBV）
 
 ## 配線表
 
