@@ -5,12 +5,17 @@
 //   CH2 WAVE : GPIO2 = +, GPIO3 = - (differential pair, experimental)
 //              PWM carrier whose duty is updated by DMA from a waveform table.
 //              Put an RC low-pass filter on each pin to get an analog waveform.
+//   INV      : GPIO4/6/8 = U/V/W IN, GPIO10 = shared SD (active low), GPIO11 = e-stop
+//              switching signals for IR2302 half bridges (see inverter.cpp)
 //   Status   : onboard WS2812B (GPIO23)  off / green=PWM / blue=WAVE / cyan=both
+//              orange = inverter switching, red = inverter fault
 //
 // Protocol (115200, one command per line, case-insensitive):
 //   ID | STATUS
 //   PWM <freq_hz> <duty_pct> | PWM OFF
 //   WAVE <SINE|TRI|SAW|SQR> <freq_hz> <amp_pct> <offset_pct> | WAVE OFF
+//   INV ...  (see inverter.cpp)
+// Binary frame (audio): 0x02, len_lo, len_hi, len bytes of int16 LE PCM
 // Replies: "OK ..." with key=value pairs, or "ERR <reason>".
 
 #include <Arduino.h>
@@ -24,8 +29,9 @@
 #include "hardware/gpio.h"
 #include "hardware/clocks.h"
 #include "pico/time.h"
+#include "inverter.h"
 
-#define FW_ID "FGEN-RP2040 v1"
+#define FW_ID "FGEN-RP2040 v2"
 
 // ---- pins ----
 #define PWM_PIN_A   0
@@ -316,8 +322,14 @@ static bool waveSet(WaveType type, double freq, double amp, double ofs, String &
 // status LED / reporting / command parser
 // =====================================================================
 static void updateLed() {
+  static uint32_t last = 0xFFFFFFFF;
   bool p = pwmState.mode != PWM_OFF, w = waveState.on;
-  pixel.setPixelColor(0, pixel.Color(0, p ? 40 : 0, w ? 40 : 0));
+  uint32_t c = pixel.Color(0, p ? 40 : 0, w ? 40 : 0);
+  if (invFault()) c = pixel.Color(60, 0, 0);
+  else if (invActive()) c = pixel.Color(50, 18, 0);
+  if (c == last) return;
+  last = c;
+  pixel.setPixelColor(0, c);
   pixel.show();
 }
 
@@ -361,10 +373,13 @@ static void handleLine(char *line) {
   if (!cmd) return;
 
   if (!strcmp(cmd, "ID")) {
-    Serial.printf("OK ID %s sys=%lu\n", FW_ID, (unsigned long)sysHz);
+    Serial.printf("OK ID %s sys=%lu inv=1\n", FW_ID, (unsigned long)sysHz);
   } else if (!strcmp(cmd, "STATUS")) {
     reportPwm();
     reportWave();
+    invReport();
+  } else if (!strcmp(cmd, "INV")) {
+    invHandleCommand();
   } else if (!strcmp(cmd, "PWM")) {
     char *a = strtok(nullptr, " \t");
     double f, d;
@@ -406,8 +421,9 @@ static void handleLine(char *line) {
 
 // =====================================================================
 void setup() {
-  Serial.begin(115200);
   sysHz = clock_get_hz(clk_sys);
+  invInit(sysHz);          // first: inverter SD low, IN low
+  Serial.begin(115200);
 
   pwmSlice = pwm_gpio_to_slice_num(PWM_PIN_A);
   waveSlice = pwm_gpio_to_slice_num(WAVE_PIN_P);
@@ -425,13 +441,40 @@ void setup() {
 
   pixel.begin();
   updateLed();
+  rp2040.wdt_begin(500);   // firmware hang -> reset -> SD pulled low externally
 }
 
-void loop() {
+// text lines and binary audio frames share the same stream
+static void readSerial() {
   static char buf[128];
   static size_t len = 0;
+  static uint16_t frame[2048];          // int16 samples
+  static uint8_t fState = 0;            // 0 text, 1 len lo, 2 len hi, 3 payload
+  static size_t fNeed = 0, fGot = 0;
+  static uint32_t fStart = 0;
+
+  if (fState && millis() - fStart > 300) fState = 0;   // broken frame: resync
   while (Serial.available()) {
-    char c = Serial.read();
+    if (fState == 3) {
+      size_t n = Serial.available();
+      if (n > fNeed - fGot) n = fNeed - fGot;
+      fGot += Serial.readBytes((char *)frame + fGot, n);
+      if (fGot >= fNeed) {
+        invAudioData((const int16_t *)frame, fNeed / 2);
+        fState = 0;
+      }
+      continue;
+    }
+    int c = Serial.read();
+    if (c < 0) break;
+    if (fState == 1) { fNeed = c; fState = 2; continue; }
+    if (fState == 2) {
+      fNeed |= (size_t)c << 8;
+      fGot = 0;
+      fState = (fNeed == 0 || fNeed > sizeof(frame) || (fNeed & 1)) ? 0 : 3;
+      continue;
+    }
+    if (c == 0x02 && len == 0) { fState = 1; fStart = millis(); continue; }
     if (c == '\r' || c == '\n') {
       if (len) {
         buf[len] = 0;
@@ -442,4 +485,16 @@ void loop() {
       buf[len++] = c;
     }
   }
+}
+
+void loop() {
+  static bool hostWasConnected = false;
+  bool host = (bool)Serial;   // DTR
+  if (hostWasConnected && !host) invOnHostDisconnect();
+  hostWasConnected = host;
+
+  readSerial();
+  invPoll();
+  updateLed();
+  rp2040.wdt_reset();
 }

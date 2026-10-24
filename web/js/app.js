@@ -1,6 +1,7 @@
 import { connect, availableMethods, isAndroid } from "./transport.js";
 import { calcPwm, calcWave, fmtHz } from "./sim.js";
 import { Scope } from "./scope.js";
+import { createInverter } from "./inverter.js";
 
 const $ = (s, el = document) => el.querySelector(s);
 const $$ = (s, el = document) => [...el.querySelectorAll(s)];
@@ -15,6 +16,7 @@ const DEFAULT = {
   wave: { type: "SINE", f: 1000, amp: 100, ofs: 50 },
   sim: { mode: "rc", R: 1000, CnF: 10, show: { b: false, p: true, n: true, diff: true } },
   method: "auto",
+  view: "gen",
 };
 const STORE_KEY = "fgen-ui-v1";
 let S = structuredClone(DEFAULT);
@@ -164,7 +166,7 @@ function apply(ch, fromSwitch) {
 
 function send(cmd) {
   if (!link) return;
-  log(cmd, "tx");
+  if (cmd !== "INV STATUS") log(cmd, "tx");     // 定期ポーリングはログに出さない
   link.write(cmd + "\n");
 }
 
@@ -177,8 +179,16 @@ function kv(line) {
   return o;
 }
 
+let lastInvLog = "";
 function handleLine(line) {
-  log(line, line.startsWith("ERR") ? "er" : "rx");
+  if (line.startsWith("OK INV") || line.startsWith("AUD ")) {
+    // ポーリング応答は状態が変わったときだけログに残す
+    const st = line.startsWith("OK INV") ? (line.match(/state=(\S+)/) || [])[1] : null;
+    if (st && st !== lastInvLog) { log(line, "rx"); lastInvLog = st; }
+  } else {
+    log(line, line.startsWith("ERR") ? "er" : "rx");
+  }
+  if (inv.handleLine(line)) return;
   const k = kv(line);
   try {
     if (line.startsWith("OK PWM")) {
@@ -201,6 +211,7 @@ function handleLine(line) {
       setInfo("wave", t, on);
     } else if (line.startsWith("OK ID")) {
       setStatus(true, line.slice(6).split(" sys=")[0]);
+      inv.setSupported(k.inv === "1");
     } else if (line.startsWith("ERR")) {
       toast(line, true);
     }
@@ -250,6 +261,7 @@ $("#connect").addEventListener("click", async () => {
   $$(".switch input").forEach((s) => (s.disabled = false));
   log(`接続 (${link.kind})`, "rx");
   try { wakeLock = await navigator.wakeLock?.request("screen"); } catch {}
+  inv.onConnect();
   send("ID");
   send("STATUS");
 });
@@ -263,6 +275,7 @@ async function disconnect(closeLink = true) {
   setInfo("pwm", "未接続", false);
   setInfo("wave", "未接続", false);
   setStatus(false);
+  inv.onDisconnect();
   $("#connect").textContent = "接続";
   $("#connect").classList.add("primary");
   try { await wakeLock?.release(); } catch {}
@@ -285,6 +298,7 @@ function redraw() {
   if (raf) return;
   raf = requestAnimationFrame(() => {
     raf = 0;
+    if (S.view === "inv") return scope.drawInverter(inv.simState());
     const rc = (S.sim.R || 0) * (S.sim.CnF || 0) * 1e-9;
     scope.draw({
       pwm: calcPwm(S.pwm.f, S.pwm.duty), pwmActive: !!link && out.pwm, showB: S.sim.show.b,
@@ -294,6 +308,26 @@ function redraw() {
   });
 }
 new ResizeObserver(redraw).observe($("#scope"));
+
+const inv = createInverter($("#inv-card"), {
+  send,
+  sendBytes: (b) => link && link.writeBytes(b),
+  connected: () => !!link,
+  toast,
+  redraw,
+});
+
+const tabs = $$(".tabs button");
+const showView = () => {
+  tabs.forEach((b) => b.classList.toggle("sel", b.dataset.view === S.view));
+  $$(".sim-opts").forEach((e) => (e.style.visibility = S.view === "gen" ? "" : "hidden"));
+  $(".controls").classList.toggle("inv-first", S.view === "inv");
+  redraw();
+};
+tabs.forEach((b) => b.addEventListener("click", () => { S.view = b.dataset.view; save(); showView(); }));
+// インバータのカードを触ったら自動でインバータ表示に切り替える
+$("#inv-card").addEventListener("input", () => { if (S.view !== "inv") { S.view = "inv"; save(); showView(); } });
+showView();
 syncSim(true);
 
 // ---------------------------------------------------------------------

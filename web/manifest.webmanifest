@@ -2,6 +2,7 @@
   "name": "RP2040 ファンクションジェネレータ",
   "short_name": "FuncGen",
   "description": "YD-RP2040 を USB 経由で操作する簡易ファンクションジェネレータ",
+  "id": "/picofunc/",
   "start_url": "./",
   "scope": "./",
   "display": "standalone",

@@ -193,3 +193,31 @@ export function fmtHz(f) {
   if (f >= 1e3) return `${g(f / 1e3, 6)} kHz`;
   return `${g(f, 6)} Hz`;
 }
+
+// ---------------------------------------------------------------------
+// inverter (src/inverter.cpp の applyCarrier と同じ計算)
+// ---------------------------------------------------------------------
+export const INV = {
+  FC_MIN: 10000, FC_MAX: 120000, F1_MIN: 1, F1_MAX: 1500,
+  RATIO: 8, M_MAX: 0.8, M_DC_MAX: 0.3, DUTY_MIN: 0.02, T_LOW_MIN: 1e-6,
+};
+
+export function calcInverter(fc) {
+  fc = clamp(fc, INV.FC_MIN, INV.FC_MAX);
+  const top1 = Math.round(SYS_HZ / (2 * fc));
+  const fcAct = SYS_HZ / (2 * top1);
+  const dmin = Math.max(INV.DUTY_MIN, INV.T_LOW_MIN * fcAct);
+  const lo = Math.ceil(dmin * top1);
+  return { top1, fcAct, dmin, dLo: lo / top1, dHi: (top1 - lo) / top1 };
+}
+
+// 各脚の duty (0..1)。3P: [U, V, W]、1P: [A, B]
+export function invDuties(mode, m, th, rev, c) {
+  const cl = (d) => clamp(d, c.dLo, c.dHi);
+  if (mode === "1P") {
+    const v = m * Math.sin(th);
+    return [cl((1 + v) / 2), cl((1 - v) / 2)];
+  }
+  const s = (k) => (1 + m * Math.sin(th - k * 2 * Math.PI / 3)) / 2;
+  return rev ? [cl(s(0)), cl(s(-1)), cl(s(1))] : [cl(s(0)), cl(s(1)), cl(s(-1))];
+}

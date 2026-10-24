@@ -33,7 +33,9 @@ class Base {
   }
   // 書き込みは直列化 (同時 write で順序が崩れないように)
   write(text) {
-    const data = this._enc.encode(text);
+    return this.writeBytes(this._enc.encode(text));
+  }
+  writeBytes(data) {
     this._chain = this._chain.then(() => this._write(data)).catch((e) => this._fail(e));
     return this._chain;
   }
