@@ -28,7 +28,8 @@
 #define F1_MIN          1.0
 #define F1_MAX          1500.0
 #define CARRIER_RATIO   8.0       // carrier must be >= 8x the fundamental / audio bandwidth
-#define M_MAX           0.8       // modulation index limit
+#define M_MAX_DEFAULT   0.8       // modulation index limit (after boot / USB disconnect)
+#define M_MAX_UNLOCKED  0.99      // "INV LIMIT UNLOCK"
 #define M_DC_MAX        0.3       // DC excitation: current is limited only by winding resistance
 #define DUTY_MIN        0.02      // keep the low side on every period (bootstrap)
 #define T_LOW_MIN       1.0e-6    // and at least this long (IR2302 dead time 540 ns + margin)
@@ -78,6 +79,7 @@ static double fcSet = 20000, fcAct = 20000, dmin = DUTY_MIN;
 static uint32_t top1 = 5000;                  // TOP + 1
 static double fCur = 0, fTgt = 0, accel = ACCEL_DEFAULT;
 static double mCur = 0, mTgt = 0;
+static double mLimit = M_MAX_DEFAULT;          // m の上限 (INV LIMIT で切替)
 static uint32_t dcTarget = 0;
 static uint32_t dcDeadline = 0;
 static State afterRamp = S_IDLE;              // where a ramp to m=0 ends
@@ -245,6 +247,7 @@ void invReport() {
   line += " estop=";     line += gpio_get(PIN_ESTOP) ? 0 : 1;
   line += " dmin=";      line += String(dmin * 100.0, 2);
   line += " accel=";     line += String(accel, 1);
+  line += " mlim=";      line += String(mLimit, 2);
   if (state == S_DC) {
     line += " dcleft=";
     line += String(((int32_t)(dcDeadline - millis())) / 1000.0, 1);
@@ -298,6 +301,7 @@ void invSetTheta(uint32_t t) { isrTheta = t; }
 uint32_t invGetTheta() { return isrTheta; }
 
 void invOnHostDisconnect() {
+  mLimit = M_MAX_DEFAULT;          // 上限解除は接続中だけ有効
   if (state == S_OFF || state == S_FAULT) return;
   if (state == S_PRECHARGE) goOff();
   else beginRampDown(S_OFF);
@@ -477,6 +481,18 @@ void invHandleCommand() {
     if (state == S_RUN || state == S_DC || state == S_AUDIO) beginRampDown(S_IDLE);
     invReport();
 
+  } else if (!strcmp(sub, "LIMIT")) {
+    char *a = tok();
+    if (a && !strcmp(a, "UNLOCK")) {
+      mLimit = M_MAX_UNLOCKED;
+    } else if (a && !strcmp(a, "NORMAL")) {
+      mLimit = M_MAX_DEFAULT;
+      if (mTgt > mLimit) mTgt = mLimit;   // 運転中なら 0.8 までランプで下げる
+    } else {
+      return err("usage: INV LIMIT <NORMAL|UNLOCK>");
+    }
+    invReport();
+
   } else if (!strcmp(sub, "DIR")) {
     char *a = tok();
     if (state == S_RUN || state == S_RAMPDOWN) return err("stop first");
@@ -492,7 +508,7 @@ void invHandleCommand() {
     char *ta = tok();
     if (ta && !num(ta, a)) return err("bad accel");
     if (f < F1_MIN || f > F1_MAX) return err("f out of range 1-1500");
-    if (m < 0 || m > M_MAX) return err("m out of range 0-0.8");
+    if (m < 0 || m > mLimit + 1e-9) return err(mLimit > M_MAX_DEFAULT ? "m out of range 0-0.99" : "m out of range 0-0.80");
     if (a < 0.1 || a > 100000) return err("accel out of range 0.1-100000");
     if (fcAct < CARRIER_RATIO * f) return err("carrier must be >= 8x fundamental");
     if (state != S_IDLE && state != S_RUN && state != S_DC) return err("not ready (enable first)");
@@ -538,7 +554,7 @@ void invHandleCommand() {
     if (mode3P) return err("audio is 1P only");
     if (fs < AUDIO_FS_MIN || fs > AUDIO_FS_MAX) return err("fs out of range 4000-48000");
     if (bw <= 0 || bw > fs / 2) return err("bw must be 0 < bw <= fs/2");
-    if (m < 0 || m > M_MAX) return err("m out of range 0-0.8");
+    if (m < 0 || m > mLimit + 1e-9) return err(mLimit > M_MAX_DEFAULT ? "m out of range 0-0.99" : "m out of range 0-0.80");
     if (fcAct < CARRIER_RATIO * bw) return err("carrier must be >= 8x audio bandwidth");
     if (state != S_IDLE && state != S_AUDIO) return err("not ready (enable / stop first)");
     if (state == S_IDLE) {

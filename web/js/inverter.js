@@ -7,7 +7,10 @@ const DEFAULT = {
   mode: "3P", fc: 20000, f: 50, m: 0.3, accel: 100, dir: "FWD",
   dcDeg: 0, dcM: 0.15, dcTo: 10, audM: 0.3, loop: false, vbus: 30,
 };
-const POLL_MS = 300;
+const POLL_MS = 300;             // 停止中・待機中
+const POLL_FAST_MS = 120;        // 加減速中・角度移動中
+const M_RAMP_PER_S = 2.0;        // src/inverter.cpp と同じ
+const DC_SLEW_DEG_S = 90;
 const SEND_DEBOUNCE_MS = 120;
 const AUD_FRAME = 1024;          // samples per binary frame
 const AUD_TARGET_S = 0.3;        // keep this much audio buffered on the device
@@ -22,6 +25,7 @@ export function createInverter(root, api) {
 
   let dev = { state: "OFF" };    // last "OK INV ..." from the device
   let supported = true;
+  let devAt = 0;                 // 最後に状態を受け取った時刻 (補間表示の起点)
   let lastKind = "RUN";          // scope preview: RUN | DC | AUDIO
   const aud = { pcm: null, fs: 0, bw: 0, name: "", dur: 0, env: null, sent: 0, fill: 0, tFill: 0,
                 under: 0, playing: false, timer: 0, converting: false };
@@ -45,6 +49,8 @@ export function createInverter(root, api) {
       <input type="number" class="inv-accel" min="0.1" max="100000" step="any"><span class="unit">Hz/s</span></div>
     <div class="row only3p"><label class="name">相順</label>
       <div class="seg two inv-dir"><button data-v="FWD">正転 UVW</button><button data-v="REV">逆転 UWV</button></div></div>
+    <div class="inv-btns"><button class="btn inv-unlock">上限解除 (m ≤ 0.99)</button></div>
+    <p class="note inv-clip"></p>
     <div class="inv-err"></div>
     <div class="inv-btns">
       <button class="btn inv-run">運転</button><button class="btn inv-stop">停止 (m→0)</button>
@@ -92,6 +98,13 @@ export function createInverter(root, api) {
     audM:  { label: "音量 m", min: 0, max: INV.M_MAX, step: 0.01, unit: "", scale: 1, digits: 3 },
   };
   const views = {};
+  let mLimit = INV.M_MAX;        // デバイスの m 上限 (mlim)。上限解除で 0.99
+  // スライダーの上限を変える (値が上限を超えていれば下げる)
+  function setMax(k, max) {
+    CTL[k].max = max;
+    if (S[k] > max) S[k] = max;
+    if (views[k]) views[k]();
+  }
   for (const el of root.querySelectorAll(".ctl")) {
     const k = el.dataset.k, cfg = CTL[k];
     el.innerHTML = `<div class="row"><label class="name">${cfg.label}</label>
@@ -160,6 +173,12 @@ export function createInverter(root, api) {
     api.send(runCmd());
   });
   $(".inv-stop", root).addEventListener("click", () => api.send("INV STOP"));
+  $(".inv-unlock", root).addEventListener("click", () => {
+    if (!api.connected()) return;
+    if (mLimit > INV.M_MAX) return api.send("INV LIMIT NORMAL");
+    if (!confirm("振幅 m の上限を 0.8 から 0.99 に上げます。\n出力電圧・電流が増えます。負荷・素子の定格を確認しましたか？\n(USB を切断すると 0.8 に戻ります)")) return;
+    api.send("INV LIMIT UNLOCK");
+  });
   $(".inv-dc", root).addEventListener("click", () => api.send(dcCmd()));
   $(".inv-play", root).addEventListener("click", playAudio);
   $(".inv-astop", root).addEventListener("click", () => stopAudio(true));
@@ -171,7 +190,7 @@ export function createInverter(root, api) {
   function runError() {
     const c = calc();
     if (c.fcAct < INV.RATIO * S.f) return `キャリア ${fmtHz(c.fcAct)} が基本波 ${fmtHz(S.f)} の8倍未満です`;
-    if (S.m > INV.M_MAX) return "振幅は 0.8 までです";
+    if (S.m > mLimit + 1e-9) return `振幅は ${mLimit.toFixed(2)} までです`;
     return "";
   }
 
@@ -206,6 +225,19 @@ export function createInverter(root, api) {
     const e = runError();
     $(".inv-err", root).textContent = e;
     $(".inv-run", root).disabled = !!e || !api.connected();
+    // duty の上下限で波形の頂上が平らになる m の目安
+    const c = calc(), mClip = 1 - 2 * c.dLo;
+    const m = Math.max(S.m, S.audM);
+    $(".inv-clip", root).textContent = mLimit > INV.M_MAX || m > mClip
+      ? `このキャリア (${fmtHz(c.fcAct)}) では m > ${mClip.toFixed(2)} で波形の頂上が平らになります (duty ${(c.dLo * 100).toFixed(1)}〜${(c.dHi * 100).toFixed(1)}%: ブートストラップとデッドタイムの確保)`
+      : "";
+  }
+  function applyLimit(lim) {
+    if (Math.abs(lim - mLimit) < 1e-9) return;
+    mLimit = lim;
+    setMax("m", lim);
+    setMax("audM", lim);
+    save();
   }
 
   // ---------------- device replies ----------------
@@ -232,6 +264,8 @@ export function createInverter(root, api) {
     if (!line.startsWith("OK INV")) return false;
     const prev = dev.state;
     dev = kv(line);
+    if (dev.mlim) applyLimit(+dev.mlim);
+    devAt = performance.now();
     if (dev.mode && dev.mode !== S.mode && dev.state === "OFF") { /* keep UI choice; sent on enable */ }
     if (dev.state !== "AUDIO" && prev === "AUDIO" && aud.playing && dev.state !== "RAMPDOWN") stopAudio(false);
     render();
@@ -262,6 +296,11 @@ export function createInverter(root, api) {
     $(".inv-disable", root).disabled = !on;
     $(".inv-stop", root).disabled = !on || !["RUN", "DC", "AUDIO"].includes(st);
     $(".inv-dc", root).disabled = !on || !(st === "IDLE" || st === "DC");
+    const ub = $(".inv-unlock", root);
+    const unlocked = mLimit > INV.M_MAX;
+    ub.disabled = !on;
+    ub.classList.toggle("lit-warn", unlocked);
+    ub.textContent = unlocked ? "上限を 0.8 に戻す (現在 m ≤ 0.99)" : "上限解除 (m ≤ 0.99)";
     $(".inv-play", root).disabled = !on || !aud.pcm || aud.converting || !(st === "IDLE");
     $(".inv-astop", root).disabled = !on || st !== "AUDIO";
     root.querySelectorAll(".inv-mode button").forEach((b) => (b.disabled = on && st !== "OFF"));
@@ -369,16 +408,22 @@ export function createInverter(root, api) {
   // ---------------- lifecycle ----------------
   let pollTimer = 0;
   function onConnect() {
-    clearInterval(pollTimer);
-    pollTimer = setInterval(() => {
-      if (api.connected() && dev.state && dev.state !== "OFF" && dev.state !== "FAULT") api.send("INV STATUS");
-    }, POLL_MS);
+    clearTimeout(pollTimer);
+    const tick = () => {
+      if (!api.connected()) return;
+      const st = dev.state;
+      if (st && st !== "OFF" && st !== "FAULT") api.send("INV STATUS");
+      const fast = ["RUN", "RAMPDOWN", "PRECHARGE"].includes(st) || (st === "DC" && predict(true).moving);
+      pollTimer = setTimeout(tick, fast ? POLL_FAST_MS : POLL_MS);
+    };
+    tick();
     render();
   }
   function onDisconnect() {
-    clearInterval(pollTimer);
+    clearTimeout(pollTimer);
     stopAudio(false);
     dev = { state: "OFF" };
+    applyLimit(INV.M_MAX);           // 上限解除は接続中だけ (ファームウェアも切断で 0.8 に戻る)
     render();
   }
   function setSupported(ok) {
@@ -388,23 +433,50 @@ export function createInverter(root, api) {
   }
 
   // for the scope
-  function simState() {
+  // 補間表示: 最後の状態応答からの経過時間で、ファームウェアと同じ規則で現在値を予測する
+  function predict(interp) {
+    const st = dev.state;
+    let f = +dev.f || 0, m = +dev.m || 0, th = +dev.theta || 0;
+    if (!interp || !devAt) return { f, m, th, moving: false };
+    const dt = Math.max(0, (performance.now() - devAt) / 1000);
+    const toward = (x, tgt, rate) => (x < tgt ? Math.min(tgt, x + rate * dt) : Math.max(tgt, x - rate * dt));
+    const ftgt = +dev.ftgt || 0, mtgt = +dev.mtgt || 0;
+    if (st === "RUN") f = toward(f, ftgt, +dev.accel || 100);
+    if (["RUN", "RAMPDOWN", "DC", "AUDIO"].includes(st)) m = toward(m, mtgt, M_RAMP_PER_S);
+    let thMoving = false;
+    if (st === "DC") {
+      const diff = ((S.dcDeg - th) % 360 + 540) % 360 - 180;
+      const stepDeg = DC_SLEW_DEG_S * dt;
+      th = (th + Math.max(-stepDeg, Math.min(stepDeg, diff)) + 360) % 360;
+      thMoving = Math.abs(diff) > stepDeg + 0.05;
+    }
+    const moving = (st === "RUN" && Math.abs(f - ftgt) > 1e-6) || Math.abs(m - mtgt) > 1e-6 || thMoving;
+    return { f, m, th, moving };
+  }
+
+  function simState(opts = {}) {
+    const p = predict(opts.interp);
     const st = dev.state;
     const live = api.connected() && ["RUN", "DC", "AUDIO", "RAMPDOWN", "IDLE"].includes(st);
     // 動作中はその内容、それ以外は最後に操作した項目をプレビュー
     let kind = ["RUN", "DC", "AUDIO"].includes(st) && api.connected() ? st : lastKind;
     if (kind === "DC" && S.mode !== "3P") kind = "RUN";
     if (kind === "AUDIO" && S.mode !== "1P") kind = "RUN";
+    // 接続中は実際の出力を表示 (設定プレビューが OFF のとき)。OFF / FAULT / PRECHARGE = SD Low、IDLE = 全脚 50 %
+    if (opts.actual && api.connected()) {
+      if (!st || ["OFF", "FAULT", "PRECHARGE"].includes(st)) kind = "OFF";
+      else if (st === "IDLE") kind = "IDLE";
+    }
     const pos = aud.playing && aud.pcm ? ((aud.sent - aud.fill) % aud.pcm.length + aud.pcm.length) % aud.pcm.length / aud.pcm.length : -1;
     // 運転中はデバイスの実際の値 (ランプ途中を含む)、それ以外は設定値
-    const running = live && st === "RUN" && +dev.f > 0.5;
+    const running = live && (st === "RUN" || st === "RAMPDOWN") && p.f > 0.5;
     let m = kind === "DC" ? S.dcM : kind === "AUDIO" ? S.audM : S.m;
-    if (running || (live && (st === "DC" || st === "AUDIO"))) m = +dev.m;
+    if (running || (live && (st === "DC" || st === "AUDIO" || st === "RAMPDOWN"))) m = p.m;
     return {
-      mode: S.mode, c: live && dev.fc ? calcInverter(+dev.fc) : calc(), f: running ? +dev.f : S.f,
+      mode: S.mode, c: live && dev.fc ? calcInverter(+dev.fc) : calc(), f: running ? p.f : S.f,
       rev: S.dir === "REV", vbus: S.vbus, m, kind,
-      theta: (kind === "DC" ? (live ? +dev.theta : S.dcDeg) : 0) * Math.PI / 180,
-      active: live && st !== "IDLE",
+      theta: (kind === "DC" ? (live ? p.th : S.dcDeg) : 0) * Math.PI / 180,
+      active: live && st !== "IDLE", moving: live && p.moving,
       audio: aud.pcm ? { name: aud.name, fs: aud.fs, bw: aud.bw, dur: aud.dur, env: aud.env, pos, pcm: aud.pcm } : null,
     };
   }

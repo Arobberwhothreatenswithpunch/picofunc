@@ -30,8 +30,13 @@ const DEFAULT = {
     msel: { t: "freq", s: "1", s2: "2" },
     stats: false,
     cur: { mode: "off", src: "1", x1: 0.35, x2: 0.65, y1: 0.3, y2: 0.6 },
-    fft: { on: false, src: "1", win: "hann", span: 1, peaks: true },
+    fft: { on: false, src: { gen: "1", inv: "M" }, win: "hann", span: "auto", peaks: true, dbDiv: 10 },
     invView: "avg", mAll: false, ch1b: false,
+    h: { gen: { mode: "auto", tdiv: 1e-3 }, inv: { mode: "auto", tdiv: 1e-3 } },   // 時間軸 (自動 / 手動)
+    interp: true,                                                                   // 補間表示 (アニメーション)
+    tpos: { gen: 0.5, inv: 0.5 },     // トリガ位置 (画面の割合)
+    acq: "auto",                      // 取込モード: auto / normal / hires
+    preview: false,                   // 接続中でも出力 OFF 時に設定値を表示する
   },
 };
 const STORE_KEY = "fgen-ui-v1";
@@ -47,13 +52,15 @@ function merge(def, saved) {
 let S = structuredClone(DEFAULT);
 try { S = merge(DEFAULT, JSON.parse(localStorage.getItem(STORE_KEY) || "{}")); } catch {}
 delete S.view;
+if (typeof S.scope.fft.span === "number" && S.scope.fft.span <= 1) S.scope.fft.span = "auto";   // 旧形式 (画面比) から移行
+if (typeof S.scope.fft.src === "string") S.scope.fft.src = { gen: S.scope.fft.src === "M" ? "1" : S.scope.fft.src, inv: S.scope.fft.src };
 const save = () => { try { localStorage.setItem(STORE_KEY, JSON.stringify(S)); } catch {} };
 const SC = () => S.scope;
 
 const out = { pwm: false, wave: false };   // デバイス側の出力状態 (応答で更新)
 let link = null;                            // transport
 let wakeLock = null;
-let raf = 0, rafCompute = false;
+let raf = 0, rafCompute = false, rafTimer = 0;
 
 // ---------------------------------------------------------------------
 // formatting
@@ -333,10 +340,10 @@ const stats = new Map();
 const rcValue = () => { const rc = (S.sim.R || 0) * (S.sim.CnF || 0) * 1e-9; return rc > 0 ? rc : 0; };
 
 // トリガ点 (画面中央) を探す。見つからなければ null (Auto = 自由走行)
-function findTrigger(ch, L, slope, tw, P) {
+function findTrigger(ch, L, slope, tw, P) {   // 探索は t = tw から (どのトリガ位置でも t0 >= 0)
   const rise = slope !== "fall";
   // 刻みはキャリア等と同期しないよう無理数比にする (同期するとストロボ的に同じ位相ばかり見てしまう)
-  const start = tw / 2, len = P ? 2.2 * P : tw, step = ((P || tw) / 400) * 0.6180339887;
+  const start = tw, len = P ? 2.2 * P : tw, step = ((P || tw) / 400) * 0.6180339887;
   for (let t = start; t < start + len; t += step) {
     const v0 = ch.v(t);
     if (rise ? v0 >= L : v0 <= L) continue;
@@ -364,24 +371,62 @@ function midLevel(ch, P, tw) {
   return (lo + hi) / 2;
 }
 
-function compute() {
+// FFT の表示上限周波数。自動 = ソースの基本波の 25 次まで (周期が無ければ画面区間から)
+const FFT_SPANS = [];
+for (let e = 2; e <= 7; e++) for (const m of [1, 2, 5]) FFT_SPANS.push(m * 10 ** e);   // 100 Hz .. 50 MHz
+const FFT_DBDIV = [1, 2, 5, 10, 20];
+function fftSpan(src, tw) {
+  const sp = SC().fft.span;
+  if (sp !== "auto") return sp;
+  if (src.period > 0 && isFinite(src.period)) return Math.min(niceCeil(25 / src.period), 5e7);
+  return niceCeil(FFT_N / tw / 4);
+}
+
+// 時間軸の刻み (1-2-5 系列、10 ns/div 〜 10 s/div)
+const TDIVS = [];
+for (let e = -8; e <= 1; e++) for (const m of [1, 2, 5]) if (m * 10 ** e <= 10) TDIVS.push(m * 10 ** e);
+
+function simInputs() {
   const sc = SC(), mode = sc.mode;
-  const st = mode === "gen"
+  return mode === "gen"
     ? { mode, pwm: calcPwm(S.pwm.f, S.pwm.duty), wave: calcWave(S.wave.type, S.wave.f, S.wave.amp, S.wave.ofs),
-        showB: sc.ch1b, probe: S.sim.mode, rc: rcValue(), active: { pwm: !!link && out.pwm, wave: !!link && out.wave } }
-    : { mode, inv: inv.simState(), invView: sc.invView, mAll: sc.mAll };
+        showB: sc.ch1b, probe: S.sim.mode, rc: rcValue(), active: { pwm: !!link && out.pwm, wave: !!link && out.wave },
+        actual: !!link && !sc.preview }
+    : { mode, inv: inv.simState({ interp: sc.interp, actual: !sc.preview }), invView: sc.invView, mAll: sc.mAll };
+}
+
+// 計算の入力が前回と同じなら再計算しない (値の変わらないポーリング応答など)
+function signature(st) {
+  const sc = SC();
+  let iv = null;
+  if (st.inv) {
+    const a = st.inv.audio;
+    iv = { ...st.inv, c: st.inv.c.fcAct, audio: a ? [a.name, a.fs, Math.round(a.pos * 4000)] : null };
+  }
+  return JSON.stringify([st.mode, st.pwm, st.mode === "gen" ? S.wave : null, st.showB, st.probe, st.rc, st.active,
+                         iv, st.invView, st.mAll, st.actual, sc.on, sc.trig, sc.meas, sc.stats, sc.fft, sc.h, sc.tpos]);
+}
+
+let lastMeasAt = 0;
+let lastSig = "", forceFft = false, lastFft = null, lastFftKey = "", lastFftAt = 0, fftTrail = 0, animTimer = 0;
+
+function compute(st) {
+  const sc = SC(), mode = sc.mode;
   const b = buildChannels(st);
   const byId = Object.fromEntries(b.channels.map((c) => [c.id, c]));
   const on = sc.on[mode];
   const tr = sc.trig[mode];
   const tch = byId[tr.src] || b.channels[0];
-  const P = tch.period > 0 && isFinite(tch.period) ? tch.period : null;
-  const tdiv = P ? niceCeil((3 * P) / 10) : b.defaultTdiv;
+  // 自動時間軸は「画面で見える繰り返し」(tbPeriod) が 3 周期以上入るように選ぶ
+  const P = tch.tbPeriod > 0 && isFinite(tch.tbPeriod) ? tch.tbPeriod : null;
+  const hz = sc.h[mode];
+  const tdiv = hz.mode === "manual" ? hz.tdiv : P ? niceCeil((3 * P) / 10) : b.defaultTdiv;
   const tw = tdiv * 10;
   const autoLevel = midLevel(tch, P, tw);
   const level = tr.auto ? autoLevel : tr.level;
   const tc = findTrigger(tch, level, tr.slope, tw, P);
-  const t0 = tc === null ? 0 : tc - tw / 2;
+  const tpos = sc.tpos[mode];
+  const t0 = tc === null ? 0 : tc - tpos * tw;
 
   const recs = new Map();
   const rec = (id) => {
@@ -389,7 +434,10 @@ function compute() {
     if (!recs.has(id)) recs.set(id, record(byId[id], t0, tw, MEAS_N));
     return recs.get(id);
   };
-  const meas = sc.meas[mode].map((m) => {
+  const nowM = performance.now();
+  const reuseMeas = st.inv && st.inv.moving && frame && frame.meas && frame.mode === mode &&
+                    frame.meas.length === sc.meas[mode].length && nowM - lastMeasAt < 200;
+  const meas = reuseMeas ? frame.meas : sc.meas[mode].map((m) => {
     const r = rec(m.s);
     const v = r ? measure(m.t, r, m.t === "phase" ? rec(m.s2) : null) : NaN;
     const key = `${mode}|${m.t}|${m.s}|${m.s2 || ""}`;
@@ -400,46 +448,86 @@ function compute() {
     }
     return { ...m, v, key };
   });
+  if (!reuseMeas) lastMeasAt = nowM;
 
   let fft = null;
   const fs = sc.fft;
-  if (fs.on && byId[fs.src]) {
-    const sp = spectrum(record(byId[fs.src], t0, tw, FFT_N, 4), fs.win);
-    const fmax = sp.fmax * fs.span;
+  const fftSrc = byId[fs.src[mode]] ? fs.src[mode] : b.channels[0].id;   // 無いソースは 1 番目へ
+  const fftKey = JSON.stringify([mode, fs, fftSrc]);
+  const now = performance.now();
+  if (fs.on && !forceFft && lastFft && lastFftKey === fftKey && now - lastFftAt < 250) {
+    // 連続更新中 (アニメーション・スライダー操作) は FFT を 250 ms に 1 回までにする。最後に必ず計算し直す
+    fft = lastFft;
+    clearTimeout(fftTrail);
+    fftTrail = setTimeout(() => { forceFft = true; redraw(); }, 260);
+  } else if (fs.on) {
+    // 実機の FFT と同様に、表示スパンから記録時間を決める (画面の時間軸とは独立)
+    //   サンプリング = 4 × スパン、記録 = FFT_N 点 → 分解能 Δf = スパン / (FFT_N / 4)
+    const src = byId[fftSrc];
+    const fmax = fftSpan(src, tw);
+    const rec = record(src, t0, FFT_N / (4 * fmax), FFT_N, 8, fmax);
+    let lo = Infinity, hi = -Infinity;
+    for (const v of rec.x) { if (v < lo) lo = v; if (v > hi) hi = v; }
+    const flat = !(hi - lo > 1e-9);           // 出力 OFF などで振幅 0
+    const sp = spectrum(rec, fs.win);
     let mx = -Infinity;
     for (let k = 0; k < sp.db.length && k * sp.df <= fmax; k++) if (sp.db[k] > mx) mx = sp.db[k];
-    const refDb = Math.ceil((mx + 3) / 10) * 10;
-    fft = { sp, fmax, refDb, src: fs.src, winLabel: WINDOWS[fs.win].label,
-            peaks: fs.peaks ? peaks(sp, 5, fmax, refDb - 80) : [] };
+    const dbDiv = fs.dbDiv || 10;
+    const refDb = Math.max(Math.ceil((mx + 0.3 * dbDiv) / dbDiv) * dbDiv, -40);   // 最大ピークが上端付近に来る
+    fft = { sp, fmax, refDb, dbDiv, src: fftSrc, winLabel: WINDOWS[fs.win].label, dur: FFT_N / (4 * fmax),
+            peaks: fs.peaks && !flat ? peaks(sp, 5, fmax, refDb - 8 * dbDiv) : [],
+            empty: flat ? `信号がありません（CH${fftSrc}: ${src.off ? "出力 OFF" : "振幅 0"}）` : "" };
+    lastFft = fft; lastFftKey = fftKey; lastFftAt = now;
   }
+  forceFft = false;
 
   frame = { mode, all: b.channels, byId, channels: b.channels.filter((c) => on[c.id]),
-            t0, tw, tdiv, trig: { ch: tch, level, autoLevel, status: tc === null ? "Auto" : "Trig'd", slope: tr.slope },
+            t0, tw, tdiv, tpos, delay: (0.5 - tpos) * tw, acq: sc.acq, manual: hz.mode === "manual", trig: { ch: tch, level, autoLevel, status: tc === null ? "Auto" : "Trig'd", slope: tr.slope },
             fft, note: b.note, phasor: b.phasor, meas };
 }
 
 function redraw() { schedule(true); }
 function rerender() { schedule(false); }
+// 描画は requestAnimationFrame で行うが、フレームが来ない場合 (裏に回った窓など) に備えてタイマーでも保険をかける
 function schedule(full) {
   rafCompute = rafCompute || full;
   if (raf) return;
-  raf = requestAnimationFrame(() => {
+  const run = () => {
+    if (!raf) return;
+    cancelAnimationFrame(raf);
+    clearTimeout(rafTimer);
     raf = 0;
-    if ((rafCompute && SC().run) || !frame) compute();
+    if ((rafCompute && SC().run) || !frame) {
+      const st = simInputs();
+      const sig = signature(st);
+      if (sig !== lastSig || forceFft || !frame) { compute(st); lastSig = sig; }
+      // 補間表示: 予測値が目標に達するまで約 30 fps で描き直す
+      if (st.inv && st.inv.moving && SC().interp) {
+        clearTimeout(animTimer);
+        animTimer = setTimeout(redraw, 33);
+      }
+    }
     rafCompute = false;
     render();
-  });
+  };
+  raf = requestAnimationFrame(run);
+  rafTimer = setTimeout(run, 60);
 }
 
 function render() {
   if (!frame) return;
   const sc = SC();
-  scope.draw({ ...frame, cursors: sc.cur });
-  $("#scope").style.touchAction = sc.cur.mode === "off" ? "pan-y" : "none";
+  const d = scope.draw({ ...frame, cursors: sc.cur });
+  frame.hires = d.hires;
   renderStatus();
   renderSidebar();
   renderKeys();
   softkeys.refresh();
+}
+
+// 内容が変わったときだけ書き換える (毎フレーム作り直すとクリックが失われる)
+function setHtml(el, html) {
+  if (el._html !== html) { el.innerHTML = html; el._html = html; }
 }
 
 function renderStatus() {
@@ -449,15 +537,16 @@ function renderStatus() {
   h.push(`<div class="sb"><span class="lbl">${modeLabel}</span></div>`);
   for (const ch of f.all) {
     if (!sc.on[f.mode][ch.id]) continue;
-    h.push(`<div class="sb"><span class="tag" style="background:${ch.color}">${ch.id}</span>${ch.label} ${fmtSI(ch.vdiv, "V/", 3)}</div>`);
+    h.push(`<div class="sb"><span class="tag" style="background:${ch.color}">${ch.id}</span>${ch.label} ${fmtSI(ch.vdiv, "V/", 3)}${ch.off ? ' <span class="lbl">OFF</span>' : ""}</div>`);
   }
   h.push(`<div class="sb grow"></div>`);
-  h.push(`<div class="sb"><span class="lbl">H</span>${fmtSI(f.tdiv, "s/", 4)}</div>`);
-  h.push(`<div class="sb"><span class="lbl">▼</span>0.000s</div>`);
+  h.push(`<div class="sb click" data-act="horiz" title="クリックで時間軸メニュー"><span class="lbl">H</span>${fmtSI(f.tdiv, "s/", 4)}${f.manual ? ' <span class="lbl">手動</span>' : ""}</div>`);
+  h.push(`<div class="sb"><span class="lbl">▼</span>${fmtSI(f.delay, "s", 4)}</div>`);
+  if (f.hires) h.push(`<div class="sb"><span class="lbl">Hi-Res</span></div>`);
   const tc = f.trig.ch;
   h.push(`<div class="sb"><span class="lbl">${f.trig.status}</span><span class="tag" style="background:${tc.color}">${tc.id}</span>${f.trig.slope === "fall" ? "↓" : "↑"} ${fmtSI(f.trig.level, "V", 3)}</div>`);
   h.push(`<div class="sb ${sc.run ? "run" : "stop"}">${sc.run ? "Run" : "Stop"}</div>`);
-  $("#statusbar").innerHTML = h.join("");
+  setHtml($("#statusbar"), h.join(""));
 }
 
 function renderSidebar() {
@@ -498,7 +587,7 @@ function renderSidebar() {
     f.fft.peaks.forEach((p, i) => h.push(`<div class="c-row"><span>${i + 1}</span><span>${fmtSI(p.f, "Hz")} ${p.db.toFixed(1)}dBV</span></div>`));
     h.push(`</div></div>`);
   }
-  $("#sidebar").innerHTML = h.join("");
+  setHtml($("#sidebar"), h.join(""));
 }
 
 // ---------------------------------------------------------------------
@@ -513,11 +602,16 @@ function renderKeys() {
   for (const k of $$("#front .key")) {
     const key = k.dataset.key;
     let lit = false, dis = false;
-    if (key === "run") { lit = true; k.classList.toggle("stopped", !sc.run); k.textContent = sc.run ? "Run" : "Stop"; }
+    if (key === "run") {
+      lit = true;
+      k.classList.toggle("stopped", !sc.run);
+      const t = sc.run ? "Run" : "Stop";
+      if (k.textContent !== t) k.textContent = t;
+    }
     else if (key === "ch") { const id = k.dataset.ch; dis = !chExists(id); lit = !dis && !!sc.on[sc.mode][id]; }
     else if (key === "fft") lit = sc.fft.on;
     else if (key === "cursor") lit = sc.cur.mode !== "off";
-    else if (["meas", "trig", "disp", "util"].includes(key)) lit = sc.menu === key;
+    else if (["meas", "trig", "disp", "util", "horiz"].includes(key)) lit = sc.menu === key;
     else if (key.startsWith("gen") || key === "inv") lit = sc.panel === key;
     k.classList.toggle("lit", lit);
     k.disabled = dis;
@@ -556,14 +650,31 @@ function pressKey(key, id) {
   redraw();
 }
 $$("#front .key").forEach((k) => k.addEventListener("click", () => pressKey(k.dataset.key, k.dataset.ch)));
+$("#statusbar").addEventListener("click", (e) => { if (e.target.closest('[data-act="horiz"]')) pressKey("horiz"); });
 
+// 時間軸を 1 段変える。dir = +1: 拡大 (s/div を小さく) / -1: 縮小
+function stepTdiv(dir) {
+  const sc = SC(), h = sc.h[sc.mode];
+  const cur = h.mode === "manual" ? h.tdiv : frame ? frame.tdiv : h.tdiv;
+  let i = TDIVS.findIndex((v) => v >= cur * 0.999);
+  if (i < 0) i = TDIVS.length - 1;
+  i = Math.min(Math.max(i - dir, 0), TDIVS.length - 1);
+  h.mode = "manual";
+  h.tdiv = TDIVS[i];
+  save();
+  redraw();
+}
+
+// いま選んでいる発生器の主チャンネルでトリガし、時間軸を自動に戻す
 function autoScale() {
   const sc = SC();
-  if (sc.mode === "gen") sc.on.gen = { 1: true, 2: true, 3: false, 4: false };
+  const src = sc.mode === "gen" && sc.panel === "gen2" ? "2" : "1";
+  if (sc.mode === "gen") sc.on.gen[src] = true;
   else sc.on.inv = { 1: true, 2: true, 3: true, M: true };
-  sc.trig[sc.mode] = { ...sc.trig[sc.mode], src: "1", slope: "rise", auto: true };
+  sc.trig[sc.mode] = { ...sc.trig[sc.mode], src, slope: "rise", auto: true };
+  sc.h[sc.mode].mode = "auto";
   sc.run = true;
-  toast("Auto Scale");
+  toast(`Auto Scale (トリガ CH${src}、時間軸 自動)`);
 }
 
 // ---------------------------------------------------------------------
@@ -630,13 +741,19 @@ function menuFor(name) {
     case "fft":
       return ["FFT", [
         toggleItem("FFT", () => sc.fft.on, (v) => (sc.fft.on = v), COLORS.M),
-        { label: "ソース", options: srcOpts, get: () => sc.fft.src, set: (v) => { sc.fft.src = v; save(); redraw(); } },
+        { label: "ソース", options: srcOpts, get: () => (frame && frame.fft ? frame.fft.src : sc.fft.src[mode]),
+          set: (v) => { sc.fft.src[mode] = v; save(); redraw(); } },
         { label: "窓関数", options: () => Object.entries(WINDOWS).map(([v, o]) => ({ v, label: o.label })),
           get: () => sc.fft.win, set: (v) => { sc.fft.win = v; save(); redraw(); } },
-        { label: "スパン", options: () => [1, 0.5, 0.2, 0.1, 0.05, 0.02, 0.01].map((v) => ({ v, label: v === 1 ? "全域 (fs/2)" : `1/${Math.round(1 / v)}` })),
+        { label: "スパン", options: () => [{ v: "auto", label: "自動 (基本波の 25 次まで)", short: frame && frame.fft ? `自動 ${fmtHz(frame.fft.fmax)}` : "自動" },
+            ...FFT_SPANS.map((v) => ({ v, label: `0 〜 ${fmtHz(v)}` }))],
           get: () => sc.fft.span, set: (v) => { sc.fft.span = v; save(); redraw(); } },
-        toggleItem("ピーク", () => sc.fft.peaks, (v) => (sc.fft.peaks = v)),
-        { label: "レコード", value: () => `${FFT_N / 1024}k点`, onClick: () => toast(`FFT は画面区間を ${FFT_N} 点でサンプリングして計算します`) },
+        { label: "dB/div", options: () => FFT_DBDIV.map((v) => ({ v, label: `${v} dB/div` })),
+          get: () => sc.fft.dbDiv || 10, set: (v) => { sc.fft.dbDiv = v; save(); redraw(); } },
+        { label: "ピーク · Δf", value: () => `${sc.fft.peaks ? "ON" : "OFF"} ${frame && frame.fft ? fmtSI(frame.fft.sp.df, "Hz", 2) : ""}`,
+          lit: () => sc.fft.peaks,
+          onClick: () => { sc.fft.peaks = !sc.fft.peaks; save(); redraw();
+            toast(`FFT: ${FFT_N} 点、サンプリング = 4 × スパン、記録時間 ${frame && frame.fft ? fmtSI(frame.fft.dur, "s", 3) : "-"}`); } },
       ]];
     case "trig": {
       const tr = () => sc.trig[mode];
@@ -649,16 +766,35 @@ function menuFor(name) {
         { label: "レベル値", num: { get: () => +(frame ? frame.trig.level : tr().level).toFixed(3),
           set: (v) => { tr().level = v; tr().auto = false; save(); redraw(); }, step: 0.1, unit: "V" } },
         { label: "50% に設定", onClick: () => { if (frame) tr().level = +frame.trig.autoLevel.toFixed(3); tr().auto = false; save(); redraw(); } },
+        { label: "位置", value: () => (Math.abs(sc.tpos[mode] - 0.5) < 1e-6 ? "中央" : `${Math.round(sc.tpos[mode] * 100)}% → 中央へ`),
+          onClick: () => { sc.tpos[mode] = 0.5; save(); redraw(); } },
       ]];
     }
     case "disp":
       return ["表示", [
         viewItem(),
-        toggleItem("線間 3 本", () => sc.mAll, (v) => (sc.mAll = v)),
-        toggleItem("GP1 反転", () => sc.ch1b, (v) => (sc.ch1b = v)),
+        { label: "取込モード", options: () => [{ v: "auto", label: "自動 (詰まったら平均を重ねる)", short: "自動" },
+                                               { v: "normal", label: "ノーマル (包絡線)", short: "ノーマル" },
+                                               { v: "hires", label: "高分解能 (平均)", short: "高分解能" }],
+          get: () => sc.acq, set: (v) => { sc.acq = v; save(); redraw(); } },
+        toggleItem("補間表示", () => sc.interp, (v) => (sc.interp = v)),
+        toggleItem("設定プレビュー", () => sc.preview, (v) => (sc.preview = v)),
         toggleItem("測定統計", () => sc.stats, (v) => { sc.stats = v; stats.clear(); }),
         { label: "統計リセット", onClick: () => { stats.clear(); redraw(); } },
       ]];
+    case "horiz": {
+      const h = () => sc.h[mode];
+      return ["水平 (時間軸)", [
+        { label: "モード", options: () => [{ v: "auto", label: "自動 (トリガソースに追従)" }, { v: "manual", label: "手動" }],
+          get: () => h().mode, set: (v) => { if (v === "manual" && frame) h().tdiv = frame.tdiv; h().mode = v; save(); redraw(); } },
+        { label: "◀ 縮小", value: () => "s/div ↑", onClick: () => stepTdiv(-1) },
+        { label: "拡大 ▶", value: () => "s/div ↓", onClick: () => stepTdiv(1) },
+        { label: "s/div", options: () => TDIVS.map((v) => ({ v, label: fmtSI(v, "s/div", 3), short: fmtSI(v, "s/", 3) })),
+          get: () => (frame ? frame.tdiv : h().tdiv), set: (v) => { h().mode = "manual"; h().tdiv = v; save(); redraw(); } },
+        { label: "Auto Scale", onClick: () => { autoScale(); save(); redraw(); } },
+        { label: "操作", value: () => "画面の左右", onClick: () => toast("画面の右端クリック=拡大、左端=縮小。マウスホイールでも変更できます") },
+      ]];
+    }
     case "util":
       return ["Utility", [
         { label: "接続方式", options: () => [{ v: "auto", label: "自動" }, { v: "serial", label: "Web Serial (PC)" }, { v: "usb", label: "WebUSB (Android)" }],
@@ -708,6 +844,36 @@ function setMenu() {
   softkeys.set(title, items);
 }
 
+scope.onZoom = (dir) => stepTdiv(dir);
+// FFT: 左右 = スパン (+1 で狭く)、上下 = dB/div (+1 で拡大)
+scope.onFftZoom = (axis, dir) => {
+  const fs = SC().fft;
+  if (axis === "x") {
+    const cur = frame && frame.fft ? frame.fft.fmax : FFT_SPANS[0];
+    let i = FFT_SPANS.findIndex((v) => v >= cur * 0.999);
+    if (i < 0) i = FFT_SPANS.length - 1;
+    fs.span = FFT_SPANS[Math.min(Math.max(i - dir, 0), FFT_SPANS.length - 1)];
+  } else {
+    let i = FFT_DBDIV.indexOf(fs.dbDiv || 10);
+    if (i < 0) i = 3;
+    fs.dbDiv = FFT_DBDIV[Math.min(Math.max(i - dir, 0), FFT_DBDIV.length - 1)];
+  }
+  save();
+  redraw();
+};
+scope.onTrigLevel = (v) => {
+  const tr = SC().trig[SC().mode];
+  tr.level = +v.toFixed(3);
+  tr.auto = false;
+  save();
+  redraw();
+};
+scope.onTrigPos = (fr) => {
+  SC().tpos[SC().mode] = fr;
+  save();
+  redraw();
+};
+scope.onRepaint = () => rerender();
 scope.onCursor = (name, frac) => {
   SC().cur[name.toLowerCase()] = frac;
   save();
@@ -715,7 +881,7 @@ scope.onCursor = (name, frac) => {
 };
 
 new ResizeObserver(rerender).observe($(".screen"));
-compute();
+{ const st0 = simInputs(); compute(st0); lastSig = signature(st0); }
 setMenu();
 render();
 

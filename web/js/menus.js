@@ -84,36 +84,51 @@ export function createSoftkeys(container, popupEl) {
     return it.value ? it.value() : "";
   }
 
-  function render() {
+  // ボタンはメニュー切替 (set) のときだけ作る。refresh は表示を書き換えるだけ
+  // (毎フレーム作り直すと、押した瞬間に要素が入れ替わってクリックが失われる)
+  let btns = [];
+  function build() {
     container.innerHTML = "";
     const head = document.createElement("div");
     head.className = "sk-title";
     head.textContent = title;
     container.append(head);
+    btns = [];
     for (let i = 0; i < SLOTS; i++) {
       const it = items[i];
       const b = document.createElement("button");
       b.className = "softkey";
-      if (!it) { b.classList.add("empty"); b.disabled = true; container.append(b); continue; }
-      const dis = it.disabled ? it.disabled() : false;
-      b.disabled = dis;
-      if (it.lit && it.lit()) b.classList.add("lit");
-      const val = valueOf(it);
+      btns.push(b);
+      container.append(b);
+      if (!it) { b.classList.add("empty"); b.disabled = true; continue; }
       b.innerHTML = `<span class="sk-l"></span><span class="sk-v"></span>`;
-      b.querySelector(".sk-l").textContent = it.label;
-      b.querySelector(".sk-v").textContent = val;
       if (it.color) b.style.setProperty("--c", it.color);
       b.addEventListener("click", () => {
         if (it.options) openOptions(b, it);
         else if (it.num) openNum(b, it);
         else { closePopup(); it.onClick(); render(); }
       });
-      container.append(b);
+    }
+    render();
+  }
+
+  function render() {
+    for (let i = 0; i < SLOTS; i++) {
+      const it = items[i], b = btns[i];
+      if (!it || !b) continue;
+      const dis = it.disabled ? !!it.disabled() : false;
+      if (b.disabled !== dis) b.disabled = dis;
+      const lit = !!(it.lit && it.lit());
+      if (b.classList.contains("lit") !== lit) b.classList.toggle("lit", lit);
+      const l = b.firstChild, v = b.lastChild;
+      if (l.textContent !== it.label) l.textContent = it.label;
+      const val = valueOf(it);
+      if (v.textContent !== val) v.textContent = val;
     }
   }
 
   return {
-    set(t, list) { title = t; items = list; closePopup(); render(); },
+    set(t, list) { title = t; items = list; closePopup(); build(); },
     refresh: render,
     close: closePopup,
   };

@@ -1,4 +1,8 @@
 // オシロスコープ風の表示部 (10 x 8 div グラティクル、トリガ / 基準マーカー、カーソル、FFT ペイン)
+//
+// 画面上の操作 (優先順):
+//   トリガのマーカー (右端 T = レベル、上端 ▼ = 位置) のドラッグ → 近いカーソルのドラッグ
+//   → 端のクリック (時間波形: 左右 = 時間軸、FFT: 左右 = スパン / 上下 = dB/div) → カーソル移動
 import { fmtHz } from "./sim.js";
 
 const C = {
@@ -8,20 +12,96 @@ const C = {
 const MONO = "ui-monospace, Consolas, 'Roboto Mono', monospace";
 const SANS = "system-ui, 'Segoe UI', 'Yu Gothic UI', 'Noto Sans JP', sans-serif";
 const DIVX = 10, DIVY = 8;
+const ZONE = 0.15;        // 時間波形: 左右この割合のクリックで時間軸
+const FZONE_X = 0.12;     // FFT: 左右 (スパン)
+const FZONE_Y = 0.15;     // FFT: 上下 (dB/div)
+const NEAR_PX = 14;       // これより近いカーソル / マーカーはドラッグを優先
+// 指 / ペンは位置がずれやすく、当たり判定も大きく取る
+const TOUCH = { near: 28, tap: 24, tapMs: 600, zone: 0.2, fzoneX: 0.16, fzoneY: 0.2, markW: 44 };
+const MOUSE = { near: NEAR_PX, tap: 8, tapMs: Infinity, zone: ZONE, fzoneX: FZONE_X, fzoneY: FZONE_Y, markW: 26 };
 
 export class Scope {
   constructor(canvas) {
     this.cv = canvas;
     this.ctx = canvas.getContext("2d");
-    this.onCursor = null;           // (name, frac) => void
+    this.onCursor = null;           // (name, frac)
+    this.onZoom = null;             // (dir)  +1: 拡大 / -1: 縮小
+    this.onFftZoom = null;          // (axis "x"|"y", dir)  +1: 拡大
+    this.onTrigLevel = null;        // (volts)
+    this.onTrigPos = null;          // (frac 0..1)
+    this.onRepaint = null;          // ホバー表示の更新
+    this.hover = "";
+    this.pending = null;            // クリック待ちの端の操作
+    this.wheelAcc = 0;
     this.cursors = null;
     this.layout = null;
+    this.fftLayout = null;
+    this.trig = null;               // { y (レベルの画面位置), x (位置), ch }
     this.drag = null;
-    canvas.addEventListener("pointerdown", (e) => this._down(e));
-    canvas.addEventListener("pointermove", (e) => this._move(e));
-    const up = (e) => { if (this.drag) { this.drag = null; try { canvas.releasePointerCapture(e.pointerId); } catch {} } };
+    this.touches = new Map();       // タッチ中の指 (ピンチ用)
+    this.pinch = null;
+    canvas.addEventListener("pointerdown", (e) => {
+      if (e.pointerType === "touch") {
+        this.touches.set(e.pointerId, this._pos(e));
+        if (this.touches.size === 2) { this._startPinch(); e.preventDefault(); return; }
+        if (this.touches.size > 2) return;
+      }
+      this._down(e);
+    });
+    canvas.addEventListener("pointermove", (e) => {
+      if (e.pointerType === "touch" && this.touches.has(e.pointerId)) {
+        this.touches.set(e.pointerId, this._pos(e));
+        if (this.pinch) { this._movePinch(); return; }
+      }
+      this._move(e);
+    });
+    const up = (e) => {
+      const wasPinch = !!this.pinch;
+      if (e.pointerType === "touch") {
+        this.touches.delete(e.pointerId);
+        if (this.touches.size < 2) this.pinch = null;
+      }
+      // ドラッグはその位置で確定済み (pointercancel でも値は残す)
+      if (this.drag) {
+        const dr = this.drag;
+        this.drag = null;
+        try { canvas.releasePointerCapture(e.pointerId); } catch {}
+        // マーカー / カーソルに触れただけで動かさなかった → 端のタップとして扱う
+        if (!dr.active && dr.zone && e.type === "pointerup" && !wasPinch &&
+            performance.now() - dr.t < (dr.touch ? TOUCH : MOUSE).tapMs) {
+          const z = dr.zone;
+          if (z.pane === "t" && this.onZoom) this.onZoom(z.dir);
+          if (z.pane === "f" && this.onFftZoom) this.onFftZoom(z.axis, z.dir);
+        }
+        if (this.onRepaint) this.onRepaint();
+      }
+      const z = this.pending;
+      this.pending = null;
+      if (z && e.type === "pointerup" && !wasPinch) {
+        const [px, py] = this._pos(e);
+        const tol = z.touch ? TOUCH : MOUSE;
+        if (Math.hypot(px - z.x, py - z.y) < tol.tap && performance.now() - z.t < tol.tapMs) {
+          if (z.pane === "t" && this.onZoom) this.onZoom(z.dir);
+          if (z.pane === "f" && this.onFftZoom) this.onFftZoom(z.axis, z.dir);
+        }
+      }
+    };
     canvas.addEventListener("pointerup", up);
     canvas.addEventListener("pointercancel", up);
+    canvas.addEventListener("pointerleave", () => this._setHover(""));
+    canvas.addEventListener("wheel", (e) => {
+      if (!this.layout) return;
+      const [, py] = this._pos(e);
+      const inFft = this.fftLayout && py >= this.fftLayout.y;
+      if (inFft ? !this.onFftZoom : !this.onZoom) return;
+      e.preventDefault();
+      this.wheelAcc += e.deltaY;
+      if (Math.abs(this.wheelAcc) >= 60) {
+        const dir = this.wheelAcc < 0 ? 1 : -1;     // 上 = 拡大
+        if (inFft) this.onFftZoom("x", dir); else this.onZoom(dir);
+        this.wheelAcc = 0;
+      }
+    }, { passive: false });
   }
 
   _resize() {
@@ -65,7 +145,6 @@ export class Scope {
       c.beginPath(); c.moveTo(x, py); c.lineTo(x + w, py); c.stroke();
     }
     c.setLineDash([]);
-    // center axes with 0.2 div ticks
     const cx = Math.round(x + w / 2) + 0.5, cy = Math.round(y + h / 2) + 0.5;
     c.strokeStyle = C.axis;
     c.beginPath(); c.moveTo(cx, y); c.lineTo(cx, y + h); c.moveTo(x, cy); c.lineTo(x + w, cy); c.stroke();
@@ -83,8 +162,8 @@ export class Scope {
     c.strokeRect(x + 0.5, y + 0.5, w - 1, h - 1);
   }
 
-  // 1 ピクセル列ごとに min/max を求めて連続線で描く
-  _trace(r, t0, tw, ch, span, color, width) {
+  // 1 ピクセル列ごとに値を求めて連続線で描く (span: 包絡線 [min, max]、avg: 平均値)
+  _trace(r, t0, tw, ch, src, color, width, mode) {
     const c = this.ctx, { x, y, w, h } = r;
     const divH = h / DIVY, cy = y + h / 2;
     const Y = (v) => cy - (v / ch.vdiv + ch.pos) * divH;
@@ -98,8 +177,15 @@ export class Scope {
     const cols = Math.max(1, Math.round(w));
     for (let i = 0; i < cols; i++) {
       const ta = t0 + (tw * i) / cols, tb = t0 + (tw * (i + 1)) / cols;
-      const [lo, hi] = span(ta, tb);
-      const ya = Y(lo), yb = Y(hi), px = x + i + 0.5;
+      const px = x + i + 0.5;
+      if (mode === "avg") {
+        const py = Y(src.avg((ta + tb) / 2));
+        if (prev === null) c.moveTo(px, py); else c.lineTo(px, py);
+        prev = py;
+        continue;
+      }
+      const [lo, hi] = src.span(ta, tb);
+      const ya = Y(lo), yb = Y(hi);
       let p1 = ya, p2 = yb;
       if (prev !== null && Math.abs(prev - yb) < Math.abs(prev - ya)) { p1 = yb; p2 = ya; }
       if (prev === null) c.moveTo(px, p1); else c.lineTo(px, p1);
@@ -108,6 +194,25 @@ export class Scope {
     }
     c.stroke();
     c.restore();
+  }
+
+  // 取込モード: normal = 包絡線、hires = 平均、auto = 詰まったら包絡線を薄くして平均を重ねる
+  _channel(r, f, ch, src, color, width) {
+    // 1 ピクセルにスイッチング周期の 1/5 以上入る (= 1 周期が 5 px 未満) と包絡線が帯になる
+    const dense = src.fsw && src.avg && f.tw / Math.max(1, r.w) >= 0.2 / src.fsw;
+    const acq = f.acq || "auto";
+    if (!src.avg || acq === "normal" || (acq === "auto" && !dense)) {
+      this._trace(r, f.t0, f.tw, ch, src, color, width, "span");
+      return false;
+    }
+    if (acq === "auto") {
+      this.ctx.save();
+      this.ctx.globalAlpha = 0.28;
+      this._trace(r, f.t0, f.tw, ch, src, color, width, "span");
+      this.ctx.restore();
+    }
+    this._trace(r, f.t0, f.tw, ch, src, color, width + 0.4, "avg");
+    return true;
   }
 
   _groundMarker(r, ch) {
@@ -126,19 +231,32 @@ export class Scope {
 
   _trigMarkers(r, f) {
     const c = this.ctx, { x, y, w, h } = r;
-    const cx = x + w / 2;     // trigger position: center
-    c.fillStyle = C.trig;
-    c.beginPath(); c.moveTo(cx - 6, y); c.lineTo(cx + 6, y); c.lineTo(cx, y + 8); c.closePath(); c.fill();
+    const tpos = f.tpos ?? 0.5;
+    const cx = x + tpos * w;
+    const hotP = this.hover === "TP" || (this.drag && this.drag.name === "TP");
+    c.fillStyle = hotP ? "#ffd27a" : C.trig;
+    c.beginPath(); c.moveTo(cx - 7, y); c.lineTo(cx + 7, y); c.lineTo(cx, y + 9); c.closePath(); c.fill();
+    if (hotP || (this.drag && this.drag.name === "TP")) {
+      c.save(); c.setLineDash([2, 3]); c.strokeStyle = "rgba(255,155,33,.6)";
+      c.beginPath(); c.moveTo(cx + 0.5, y); c.lineTo(cx + 0.5, y + h); c.stroke(); c.restore();
+    }
+    this.trig = { x: cx, y: null, ch: null };
     if (!f.trig || !f.trig.ch) return;
     const ch = f.trig.ch;
     const divH = h / DIVY;
     let py = y + h / 2 - (f.trig.level / ch.vdiv + ch.pos) * divH;
     py = Math.min(Math.max(py, y + 7), y + h - 7);
     const px = x + w - 1;
+    const hotL = this.hover === "TL" || (this.drag && this.drag.name === "TL");
+    if (hotL) {
+      c.save(); c.setLineDash([2, 3]); c.strokeStyle = ch.color;
+      c.beginPath(); c.moveTo(x, py + 0.5); c.lineTo(x + w, py + 0.5); c.stroke(); c.restore();
+    }
     c.fillStyle = ch.color;
     c.beginPath(); c.moveTo(px, py - 7); c.lineTo(px - 12, py - 7); c.lineTo(px - 18, py); c.lineTo(px - 12, py + 7); c.lineTo(px, py + 7);
     c.closePath(); c.fill();
     this._text("T", px - 6, py + 0.5, { color: "#000", align: "center", bold: true, size: 10 });
+    this.trig = { x: cx, y: py, ch };
   }
 
   _cursors(r, f) {
@@ -156,11 +274,42 @@ export class Scope {
       else { const py = Math.round(y + frac * h) + 0.5; c.moveTo(x, py); c.lineTo(x + w, py); }
       c.stroke();
       if (vertical) this._text(name, x + frac * w + 3, y + h - 9, { color: C.cursor, size: 10 });
-      else this._text(name, x + w - 22, y + frac * h - 7, { color: C.cursor, size: 10 });
+      else this._text(name, x + w - 44, y + frac * h - 7, { color: C.cursor, size: 10 });
     };
     if (cu.mode === "x" || cu.mode === "xy") { line("X1", true, cu.x1); line("X2", true, cu.x2); }
     if (cu.mode === "y" || cu.mode === "xy") { line("Y1", false, cu.y1); line("Y2", false, cu.y2); }
     c.restore();
+  }
+
+  // 端のクリック操作の目印
+  _hint(label, px, py, key, align = "center") {
+    const hot = this.hover === key;
+    this._text(label, px, py, { color: hot ? "rgba(255,255,255,.9)" : "rgba(255,255,255,.22)", align, mono: false, size: 11 });
+  }
+  _hotBand(key, x, y, w, h) {
+    if (this.hover !== key) return;
+    this.ctx.fillStyle = "rgba(255,255,255,.05)";
+    this.ctx.fillRect(x, y, w, h);
+  }
+  _zoomHints(r) {
+    if (!this.onZoom) return;
+    const { x, y, w, h } = r;
+    this._hotBand("t-1", x, y, w * ZONE, h);
+    this._hotBand("t1", x + w * (1 - ZONE), y, w * ZONE, h);
+    this._hint("◀ 縮小", x + 8, y + h / 2 + 14, "t-1", "left");
+    this._hint("拡大 ▶", x + w - 8, y + h / 2 + 14, "t1", "right");
+  }
+  _fftHints(r) {
+    if (!this.onFftZoom) return;
+    const { x, y, w, h } = r;
+    this._hotBand("fx-1", x, y, w * FZONE_X, h);
+    this._hotBand("fx1", x + w * (1 - FZONE_X), y, w * FZONE_X, h);
+    this._hotBand("fy1", x + w * FZONE_X, y, w * (1 - 2 * FZONE_X), h * FZONE_Y);
+    this._hotBand("fy-1", x + w * FZONE_X, y + h * (1 - FZONE_Y), w * (1 - 2 * FZONE_X), h * FZONE_Y);
+    this._hint("◀ 広く", x + 8, y + h / 2, "fx-1", "left");
+    this._hint("狭く ▶", x + w - 8, y + h / 2, "fx1", "right");
+    this._hint("▲ 縦 拡大", x + w / 2, y + 24, "fy1");
+    this._hint("▼ 縦 縮小", x + w / 2, y + h - 24, "fy-1");
   }
 
   _phasor(r, p) {
@@ -191,11 +340,16 @@ export class Scope {
     const c = this.ctx, { x, y, w, h } = r;
     const { db, df } = fx.sp;
     const fmax = fx.fmax;
-    const top = fx.refDb, dbDiv = 10;
+    const top = fx.refDb, dbDiv = fx.dbDiv || 10;
     const Y = (d) => y + ((top - d) / (dbDiv * DIVY)) * h;
+    if (fx.empty) {
+      this._text(fx.empty, x + w / 2, y + h / 2 - 16, { color: C.text, align: "center", mono: false });
+      this._text("出力を ON にするか、表示メニュー → 設定プレビュー で設定値を表示", x + w / 2, y + h / 2 + 6,
+                 { color: C.dim, align: "center", mono: false, size: 11 });
+    }
     c.save();
     c.beginPath(); c.rect(x, y, w, h); c.clip();
-    c.strokeStyle = C.fft; c.lineWidth = 1.2;
+    c.strokeStyle = fx.empty ? "transparent" : C.fft; c.lineWidth = 1.2;
     c.beginPath();
     const cols = Math.round(w);
     let started = false;
@@ -217,14 +371,17 @@ export class Scope {
       this._text(String(i + 1), px, py - 17, { color: "#fff", align: "center", size: 10 });
     });
     c.restore();
-    this._text(`FFT(${fx.src})  ${fx.winLabel}  ${dbDiv}dB/  Ref ${top}dBV`, x + 6, y + 10, { color: C.fft, size: 10 });
-    this._text("0Hz", x + 4, y + h - 9, { color: C.dim, size: 10 });
-    this._text(fmtHz(fmax / 2), x + w / 2, y + h - 9, { color: C.dim, align: "center", size: 10 });
-    this._text(fmtHz(fmax), x + w - 4, y + h - 9, { color: C.dim, align: "right", size: 10 });
+    this._text(`FFT(${fx.src})  ${fx.winLabel}  ${dbDiv}dB/  Ref ${top}dBV  Δf ${fmtHz(df)}`, x + 6, y + 10, { color: C.fft, size: 10 });
+    for (let i = 0; i <= DIVX; i += 2) {
+      const lbl = i === 0 ? "0Hz" : fmtHz((fmax * i) / DIVX);
+      const px = i === 0 ? x + 4 : i === DIVX ? x + w - 4 : x + (w * i) / DIVX;
+      this._text(lbl, px, y + h - 9, { color: C.dim, align: i === 0 ? "left" : i === DIVX ? "right" : "center", size: 10 });
+    }
     this._text(`${fmtHz(fmax / DIVX)}/div`, x + w - 4, y + 10, { color: C.dim, align: "right", size: 10 });
+    this._fftHints(r);
   }
 
-  // f = { channels, t0, tw, trig, fft, cursors, phasor, note }
+  // f = { channels, t0, tw, tpos, trig, fft, cursors, phasor, note, acq }
   draw(f) {
     this._resize();
     const c = this.ctx, W = this.W, H = this.H;
@@ -235,45 +392,145 @@ export class Scope {
     const tr = { x: 0, y: 0, w: W, h: tH };
     this.layout = tr;
     this._graticule(tr);
+    this._zoomHints(tr);
+    let hires = false;
     for (const ch of f.channels) {
-      for (const ex of ch.extra || []) this._trace(tr, f.t0, f.tw, ch, ex.span, ex.color, 1.3);
-      this._trace(tr, f.t0, f.tw, ch, ch.span, ch.color, 1.6);
+      for (const ex of ch.extra || []) hires = this._channel(tr, f, ch, ex, ex.color, 1.3) || hires;
+      hires = this._channel(tr, f, ch, ch, ch.color, 1.6) || hires;
     }
     f.channels.forEach((ch) => this._groundMarker(tr, ch));
     this._trigMarkers(tr, f);
     if (f.phasor) this._phasor(tr, f.phasor);
     this._cursors(tr, f);
     if (f.note) this._text(f.note, tr.x + tr.w / 2, tr.y + tr.h / 2 - 20, { color: C.text, align: "center", mono: false });
-    if (f.fft) this._fftPane({ x: 0, y: tH + gap, w: W, h: H - tH - gap }, f);
+    if (f.fft) {
+      this.fftLayout = { x: 0, y: tH + gap, w: W, h: H - tH - gap };
+      this._fftPane(this.fftLayout, f);
+    } else {
+      this.fftLayout = null;
+    }
     this.cursors = f.cursors;
+    return { hires };
   }
 
-  // ---------------- cursor dragging ----------------
+  // ---------------- pointer ----------------
   _pos(e) {
     const r = this.cv.getBoundingClientRect();
     return [e.clientX - r.left, e.clientY - r.top];
   }
-  _down(e) {
-    const cu = this.cursors;
-    if (!cu || cu.mode === "off" || !this.layout) return;
-    const [px, py] = this._pos(e);
-    const L = this.layout;
-    if (py > L.y + L.h) return;
-    const fx = (px - L.x) / L.w, fy = (py - L.y) / L.h;
-    const cand = [];
-    if (cu.mode === "x" || cu.mode === "xy") cand.push(["X1", Math.abs(fx - cu.x1) * L.w], ["X2", Math.abs(fx - cu.x2) * L.w]);
-    if (cu.mode === "y" || cu.mode === "xy") cand.push(["Y1", Math.abs(fy - cu.y1) * L.h], ["Y2", Math.abs(fy - cu.y2) * L.h]);
-    cand.sort((a, b) => a[1] - b[1]);
-    this.drag = { name: cand[0][0] };
-    try { this.cv.setPointerCapture(e.pointerId); } catch {}
-    this._move(e);
-    e.preventDefault();
+
+  // 位置にある操作対象を調べる
+  // 端のゾーン (時間波形: 左右 = 時間軸 / FFT: 左右 = スパン、上下 = dB/div)
+  _zoneAt(px, py, tol) {
+    const L = this.layout, F = this.fftLayout;
+    if (F && py >= F.y) {
+      const fx = (px - F.x) / F.w, fy = (py - F.y) / F.h;
+      if (fx < tol.fzoneX) return { key: "fx-1", pane: "f", axis: "x", dir: -1 };
+      if (fx > 1 - tol.fzoneX) return { key: "fx1", pane: "f", axis: "x", dir: 1 };
+      if (fy < tol.fzoneY) return { key: "fy1", pane: "f", axis: "y", dir: 1 };
+      if (fy > 1 - tol.fzoneY) return { key: "fy-1", pane: "f", axis: "y", dir: -1 };
+      return null;
+    }
+    if (!L || py > L.y + L.h || !this.onZoom) return null;
+    const zx = (px - L.x) / L.w;
+    if (zx < tol.zone) return { key: "t-1", pane: "t", dir: -1 };
+    if (zx > 1 - tol.zone) return { key: "t1", pane: "t", dir: 1 };
+    return null;
   }
-  _move(e) {
-    if (!this.drag || !this.layout) return;
+
+  _target(px, py, touch = false) {
+    const tol = touch ? TOUCH : MOUSE;
+    const L = this.layout, F = this.fftLayout;
+    const zone = this._zoneAt(px, py, tol);
+    if (F && py >= F.y) return zone;
+    if (!L || py > L.y + L.h) return null;
+    const T = this.trig;
+    const markR = touch ? tol.near : 12;
+    if (T && T.y !== null && this.onTrigLevel && px >= L.x + L.w - tol.markW && Math.abs(py - T.y) <= markR) return { key: "TL", drag: "TL", zone };
+    if (T && this.onTrigPos && py <= L.y + (touch ? 34 : 18) && Math.abs(px - T.x) <= markR) return { key: "TP", drag: "TP", zone };
+    const cu = this.cursors;
+    if (cu && cu.mode !== "off") {
+      const fx = (px - L.x) / L.w, fy = (py - L.y) / L.h;
+      const cand = [];
+      if (cu.mode === "x" || cu.mode === "xy") cand.push(["X1", Math.abs(fx - cu.x1) * L.w], ["X2", Math.abs(fx - cu.x2) * L.w]);
+      if (cu.mode === "y" || cu.mode === "xy") cand.push(["Y1", Math.abs(fy - cu.y1) * L.h], ["Y2", Math.abs(fy - cu.y2) * L.h]);
+      cand.sort((a, b) => a[1] - b[1]);
+      if (cand[0][1] <= tol.near) return { key: cand[0][0], drag: cand[0][0], zone };
+      if (zone) return zone;
+      return { key: "", drag: cand[0][0], immediate: true };   // 遠くても最寄りのカーソルをその位置へ
+    }
+    return zone;
+  }
+
+  // 2 本指のピンチ: 広げる = 拡大、すぼめる = 縮小 (時間波形は時間軸、FFT はスパン)
+  _startPinch() {
+    this.pending = null;
+    this.drag = null;
+    const [a, b] = [...this.touches.values()];
+    const midY = (a[1] + b[1]) / 2;
+    this.pinch = { d0: Math.hypot(a[0] - b[0], a[1] - b[1]) || 1, fft: !!(this.fftLayout && midY >= this.fftLayout.y) };
+  }
+  _movePinch() {
+    const [a, b] = [...this.touches.values()];
+    if (!a || !b) return;
+    const d = Math.hypot(a[0] - b[0], a[1] - b[1]);
+    const r = d / this.pinch.d0;
+    if (r > 1.3 || r < 0.77) {
+      const dir = r > 1 ? 1 : -1;
+      if (this.pinch.fft) { if (this.onFftZoom) this.onFftZoom("x", dir); }
+      else if (this.onZoom) this.onZoom(dir);
+      this.pinch.d0 = d;
+    }
+  }
+
+  _setHover(key) {
+    if (key === this.hover) return;
+    this.hover = key;
+    this.cv.style.cursor = key === "TL" ? "ns-resize" : key === "TP" ? "ew-resize" : key ? "pointer" : "";
+    if (this.onRepaint) this.onRepaint();
+  }
+
+  _down(e) {
     const [px, py] = this._pos(e);
+    const touch = e.pointerType !== "mouse";
+    const t = this._target(px, py, touch);
+    if (!t) return;
+    e.preventDefault();                 // ダブルタップ拡大・互換マウスイベントを防ぐ
+    if (t.drag) {
+      // 実際に動かすまでは値を変えない (触れただけでトリガレベルが指の位置へ飛ばないように)
+      this.drag = { name: t.drag, x0: px, y0: py, active: !!t.immediate, zone: t.zone || null, touch, t: performance.now() };
+      try { this.cv.setPointerCapture(e.pointerId); } catch {}
+      if (this.drag.active) this._move(e);
+      return;
+    }
+    this.pending = { ...t, x: px, y: py, t: performance.now(), touch };
+  }
+
+  _move(e) {
+    const [px, py] = this._pos(e);
+    if (!this.drag) {
+      if (e.pointerType === "mouse") { const t = this._target(px, py); this._setHover(t && t.key ? t.key : ""); }
+      return;
+    }
+    const dr = this.drag;
+    if (!dr.active) {
+      if (Math.hypot(px - dr.x0, py - dr.y0) < (dr.touch ? 10 : 3)) return;
+      dr.active = true;
+    }
     const L = this.layout;
-    const n = this.drag.name;
+    const n = dr.name;
+    if (n === "TL") {
+      const ch = this.trig && this.trig.ch;
+      if (!ch) return;
+      const divH = L.h / DIVY;
+      const v = ((L.y + L.h / 2 - py) / divH - ch.pos) * ch.vdiv;
+      if (this.onTrigLevel) this.onTrigLevel(v);
+      return;
+    }
+    if (n === "TP") {
+      if (this.onTrigPos) this.onTrigPos(Math.min(Math.max((px - L.x) / L.w, 0.05), 0.95));
+      return;
+    }
     const frac = n[0] === "X" ? (px - L.x) / L.w : (py - L.y) / L.h;
     if (this.onCursor) this.onCursor(n, Math.min(Math.max(frac, 0), 1));
   }

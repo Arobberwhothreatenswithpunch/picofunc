@@ -199,7 +199,7 @@ export function fmtHz(f) {
 // ---------------------------------------------------------------------
 export const INV = {
   FC_MIN: 10000, FC_MAX: 120000, F1_MIN: 1, F1_MAX: 1500,
-  RATIO: 8, M_MAX: 0.8, M_DC_MAX: 0.3, DUTY_MIN: 0.02, T_LOW_MIN: 1e-6,
+  RATIO: 8, M_MAX: 0.8, M_MAX_UNLOCKED: 0.99, M_DC_MAX: 0.3, DUTY_MIN: 0.02, T_LOW_MIN: 1e-6,
 };
 
 export function calcInverter(fc) {

@@ -20,16 +20,22 @@ export const MEAS_TYPES = {
 };
 
 // ch.v(t) を [t0, t0+tw) で n 点サンプリング
-// avg > 1: 各サンプル区間を avg 点で平均 (FFT 用の簡易アンチエイリアス)
-export function record(ch, t0, tw, n = MEAS_N, avg = 1) {
+//   avg > 1 : 各サンプル区間を avg 点で平均 (FFT 用の簡易アンチエイリアス)
+//   fmax > 0: FFT の表示スパン。スイッチング周波数 (− 側波帯の広がり) がこれより上の信号は、
+//             表示範囲に入る真の成分が基本波側だけなので、局所平均 (duty × 電圧) でサンプリングする
+export function record(ch, t0, tw, n = MEAS_N, avg = 1, fmax = 0) {
   const x = new Float64Array(n);
   const dt = tw / n;
-  if (avg <= 1) {
+  const useAvg = fmax > 0 && ch.avg && ch.fsw > 0 && ch.fsw - (ch.fswMargin || 0) > fmax;
+  if (useAvg) {
+    for (let i = 0; i < n; i++) x[i] = ch.avg(t0 + i * dt);
+  } else if (avg <= 1) {
     for (let i = 0; i < n; i++) x[i] = ch.v(t0 + i * dt);
   } else {
     for (let i = 0; i < n; i++) {
+      const tc = t0 + i * dt;
       let s = 0;
-      for (let j = 0; j < avg; j++) s += ch.v(t0 + (i + (j + 0.5) / avg - 0.5) * dt);
+      for (let j = 0; j < avg; j++) s += ch.v(tc + ((j + 0.5) / avg - 0.5) * dt);
       x[i] = s / avg;
     }
   }
