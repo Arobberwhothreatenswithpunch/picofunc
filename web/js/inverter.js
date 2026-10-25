@@ -13,7 +13,12 @@ const M_RAMP_PER_S = 2.0;        // src/inverter.cpp と同じ
 const DC_SLEW_DEG_S = 90;
 const SEND_DEBOUNCE_MS = 120;
 const AUD_FRAME = 1024;          // samples per binary frame
-const AUD_TARGET_S = 0.3;        // keep this much audio buffered on the device
+const AUD_TARGET_S = 1.0;        // keep this much audio buffered on the device
+const AUD_TARGET_MAX = 48000;    // ... but at most this many samples (device ring = 65536)
+const AUD_REDRAW_MS = 100;       // display refresh while streaming (keep the page responsive)
+const FRAME_MAGIC = 0x5a;        // frame: 0x02 0x5A len(2) payload sum(2)  (src/main.cpp)
+const audTarget = (fs) => Math.min(fs * AUD_TARGET_S, AUD_TARGET_MAX);
+const desiredBw = (fcAct) => Math.min(fcAct / INV.RATIO, 16000);
 
 const $ = (s, el) => el.querySelector(s);
 
@@ -212,7 +217,8 @@ export function createInverter(root, api) {
     if (k === "fc") {
       if (st === "OFF" || st === "IDLE") later("fc", () => `INV CARRIER ${S.fc}`);
       else api.toast("キャリアは停止中 (OFF / IDLE) のみ変更できます", true);
-      if (aud.pcm && calc().fcAct < INV.RATIO * aud.bw) aud.needConvert = true;
+      // キャリアが変わったら、新しいキャリアに合った帯域で変換し直す (下がったときは必須、上がったときは音質のため)
+      if (aud.pcm && Math.abs(desiredBw(calc().fcAct) - aud.bw) > aud.bw * 0.02) aud.needConvert = true;
     } else if ((k === "f" || k === "m" || k === "accel") && st === "RUN") {
       if (!runError()) later("run", runCmd);
     } else if ((k === "dcDeg" || k === "dcM" || k === "dcTo") && st === "DC") {
@@ -250,7 +256,8 @@ export function createInverter(root, api) {
     if (line.startsWith("AUD ")) {
       const k = kv(line);
       aud.fill = +k.fill; aud.tFill = performance.now(); aud.under = +k.under;
-      const pct = Math.min(100, aud.fill / (aud.fs * AUD_TARGET_S) * 100);
+      const pct = Math.min(100, aud.fill / audTarget(aud.fs) * 100);
+      aud.bad = +k.bad || 0;
       $(".inv-buf", root).style.width = `${pct}%`;
       return true;
     }
@@ -282,7 +289,7 @@ export function createInverter(root, api) {
     if (api.connected() && dev.fc) {
       info = `fc ${fmtHz(+dev.fc)}  f ${(+dev.f).toFixed(1)} Hz  m ${(+dev.m).toFixed(2)}  θ ${dev.theta}°  SD=${dev.sd}`;
       if (st === "DC" && dev.dcleft) info += `  残り ${dev.dcleft} s`;
-      if (st === "AUDIO") info += `  アンダーラン ${aud.under}`;
+      if (st === "AUDIO") info += `  アンダーラン ${aud.under}${aud.bad ? `  破損フレーム ${aud.bad}` : ""}`;
     } else if (!api.connected()) info = "未接続";
     $(".inv-info", root).textContent = info;
     const fault = $(".inv-fault", root);
@@ -367,10 +374,11 @@ export function createInverter(root, api) {
 
   async function playAudio() {
     if (!aud.pcm) return;
-    if (aud.needConvert || calc().fcAct < INV.RATIO * aud.bw) {
-      api.toast("キャリアが変わったので音声を変換し直します");
+    if (aud.needConvert || Math.abs(desiredBw(calc().fcAct) - aud.bw) > aud.bw * 0.02) {
+      api.toast("キャリアに合わせて音声を変換し直します");
       await convert(aud.file);
     }
+    aud.lastRedraw = 0;
     aud.sent = 0; aud.fill = 0; aud.tFill = performance.now(); aud.under = 0; aud.playing = true;
     api.send(`INV AUDIO START ${aud.fs} ${aud.bw} ${S.audM.toFixed(3)}`);
     clearInterval(aud.timer);
@@ -389,20 +397,27 @@ export function createInverter(root, api) {
     if (!aud.playing || !api.connected()) return stopAudio(false);
     if (dev.state !== "AUDIO") return;           // wait for the device to accept START
     let est = aud.fill - (performance.now() - aud.tFill) / 1000 * aud.fs;
-    for (let k = 0; k < 8 && est < aud.fs * AUD_TARGET_S; k++) {
+    for (let k = 0; k < 8 && est < audTarget(aud.fs); k++) {
       if (aud.sent >= aud.pcm.length) {
         if (S.loop) aud.sent = 0; else break;
       }
       const n = Math.min(AUD_FRAME, aud.pcm.length - aud.sent);
-      const frame = new Uint8Array(3 + 2 * n);
-      frame[0] = 0x02; frame[1] = (2 * n) & 0xff; frame[2] = (2 * n) >> 8;
-      frame.set(new Uint8Array(aud.pcm.buffer, aud.sent * 2, 2 * n), 3);
+      const len = 2 * n;
+      const frame = new Uint8Array(4 + len + 2);
+      frame[0] = 0x02; frame[1] = FRAME_MAGIC; frame[2] = len & 0xff; frame[3] = len >> 8;
+      const payload = new Uint8Array(aud.pcm.buffer, aud.sent * 2, len);
+      frame.set(payload, 4);
+      let sum = 0;
+      for (let i = 0; i < len; i++) sum += payload[i];
+      frame[4 + len] = sum & 0xff; frame[5 + len] = (sum >> 8) & 0xff;
       api.sendBytes(frame);
       aud.sent += n;
       aud.fill += n;
       est += n;
     }
-    api.redraw();
+    // 画面の更新は 10 回/秒まで (毎回描き直すとページが詰まり、受信と送信が遅れて音が途切れる)
+    const now = performance.now();
+    if (now - (aud.lastRedraw || 0) >= AUD_REDRAW_MS) { aud.lastRedraw = now; api.redraw(); }
   }
 
   // ---------------- lifecycle ----------------

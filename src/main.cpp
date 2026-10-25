@@ -15,7 +15,7 @@
 //   PWM <freq_hz> <duty_pct> | PWM OFF
 //   WAVE <SINE|TRI|SAW|SQR> <freq_hz> <amp_pct> <offset_pct> | WAVE OFF
 //   INV ...  (see inverter.cpp)
-// Binary frame (audio): 0x02, len_lo, len_hi, len bytes of int16 LE PCM
+// Binary frame (audio): 0x02 0x5A len_lo len_hi <int16 LE PCM> sum_lo sum_hi
 // Replies: "OK ..." with key=value pairs, or "ERR <reason>".
 
 #include <Arduino.h>
@@ -445,42 +445,72 @@ void setup() {
 }
 
 // text lines and binary audio frames share the same stream
+//   frame: 0x02 0x5A len_lo len_hi <len bytes int16 LE PCM> sum_lo sum_hi  (sum = 16-bit sum of payload bytes)
+// The 2-byte marker and checksum let the parser drop damaged frames and find the next real header,
+// so a stalled / partly lost frame can never be played as noise or read as text.
+#define FRAME_MAGIC    0x5A
+#define FRAME_TIMEOUT  1000      // ms without a byte inside a frame -> give up and resync
+
 static void readSerial() {
   static char buf[128];
   static size_t len = 0;
+  static bool junk = false;             // non-printable byte in the current text line
   static uint16_t frame[2048];          // int16 samples
-  static uint8_t fState = 0;            // 0 text, 1 len lo, 2 len hi, 3 payload
+  enum { F_TEXT, F_STX, F_LEN_LO, F_LEN_HI, F_DATA, F_SUM_LO, F_SUM_HI };
+  static uint8_t fState = F_TEXT;
   static size_t fNeed = 0, fGot = 0;
-  static uint32_t fStart = 0;
+  static uint16_t fSum = 0, fSumRx = 0;
+  static uint32_t fLast = 0;
 
-  if (fState && millis() - fStart > 300) fState = 0;   // broken frame: resync
+  if (fState != F_TEXT && millis() - fLast > FRAME_TIMEOUT) fState = F_TEXT;
   while (Serial.available()) {
-    if (fState == 3) {
+    fLast = millis();
+    if (fState == F_DATA) {
       size_t n = Serial.available();
       if (n > fNeed - fGot) n = fNeed - fGot;
-      fGot += Serial.readBytes((char *)frame + fGot, n);
-      if (fGot >= fNeed) {
-        invAudioData((const int16_t *)frame, fNeed / 2);
-        fState = 0;
-      }
+      uint8_t *dst = (uint8_t *)frame + fGot;
+      size_t got = Serial.readBytes((char *)dst, n);
+      for (size_t k = 0; k < got; k++) fSum += dst[k];
+      fGot += got;
+      if (fGot >= fNeed) fState = F_SUM_LO;
       continue;
     }
     int c = Serial.read();
     if (c < 0) break;
-    if (fState == 1) { fNeed = c; fState = 2; continue; }
-    if (fState == 2) {
-      fNeed |= (size_t)c << 8;
-      fGot = 0;
-      fState = (fNeed == 0 || fNeed > sizeof(frame) || (fNeed & 1)) ? 0 : 3;
-      continue;
+    switch (fState) {
+      case F_STX:
+        if (c == FRAME_MAGIC) { fState = F_LEN_LO; len = 0; junk = false; continue; }
+        fState = F_TEXT;          // lone 0x02: treat as junk text below
+        junk = true;
+        break;
+      case F_LEN_LO: fNeed = c; fState = F_LEN_HI; continue;
+      case F_LEN_HI:
+        fNeed |= (size_t)c << 8;
+        fGot = 0; fSum = 0;
+        if (fNeed == 0 || fNeed > sizeof(frame) || (fNeed & 1)) { invAudioBadFrame(); fState = F_TEXT; }
+        else fState = F_DATA;
+        continue;
+      case F_SUM_LO: fSumRx = c; fState = F_SUM_HI; continue;
+      case F_SUM_HI:
+        fSumRx |= (uint16_t)c << 8;
+        if (fSumRx == fSum) invAudioData((const int16_t *)frame, fNeed / 2);
+        else invAudioBadFrame();
+        fState = F_TEXT;
+        continue;
+      default:
+        break;
     }
-    if (c == 0x02 && len == 0) { fState = 1; fStart = millis(); continue; }
+    if (c == 0x02) { fState = F_STX; continue; }
     if (c == '\r' || c == '\n') {
-      if (len) {
+      // lines containing binary junk (left over from a lost frame) are dropped silently
+      if (len && !junk) {
         buf[len] = 0;
         handleLine(buf);
-        len = 0;
       }
+      len = 0;
+      junk = false;
+    } else if (c < 0x20 || c > 0x7E) {
+      junk = true;
     } else if (len < sizeof(buf) - 1) {
       buf[len++] = c;
     }

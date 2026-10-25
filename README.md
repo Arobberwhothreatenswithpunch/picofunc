@@ -92,7 +92,7 @@
 | `INV LIMIT <NORMAL\|UNLOCK>` | 振幅 m の上限 0.8 / 0.99（UNLOCK は USB 切断で解除） |
 | `INV DC <deg> <m> [timeout s]` | 直流励磁（3P、m ≤ 0.3） |
 | `INV AUDIO START <fs> <bw> <m>` / `INV AUDIO STOP` | 音声ストリーム開始（再送すると音量だけ変更）/ 停止 |
-| バイナリ `0x02, len_lo, len_hi, int16 PCM…` | 音声データ（最大 4096 byte / フレーム） |
+| バイナリ `0x02 0x5A len_lo len_hi <int16 PCM> sum_lo sum_hi` | 音声データ（最大 4096 byte / フレーム、sum = ペイロードの 16 bit 和。壊れたフレームは破棄） |
 
 応答は `OK INV state=RUN mode=3P fc=20000.0 f=50.000 m=0.300 theta=… sd=1 fault=NONE …`、エラーは `ERR INV <理由>`、イベントは `EVT INV FAULT ESTOP` などの形式。
 

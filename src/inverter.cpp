@@ -47,8 +47,8 @@
 
 #define LUT_BITS   10
 #define LUT_SIZE   (1 << LUT_BITS)
-#define RING_BITS  15
-#define RING_SIZE  (1u << RING_BITS)   // int16 samples (64 KB)
+#define RING_BITS  16
+#define RING_SIZE  (1u << RING_BITS)   // int16 samples (128 KB, about 1.6 s at 40 kHz)
 #define RING_MASK  (RING_SIZE - 1)
 #define PH_120     0x55555555u          // 120 deg in 32-bit phase
 
@@ -87,7 +87,7 @@ static uint32_t prechargeAt = 0;
 static volatile bool estopTripped = false;
 static const char *faultReason = "NONE";
 static double audFs = 0, audBw = 0;
-static uint32_t audLastData = 0, audLastReport = 0, audDrop = 0;
+static uint32_t audLastData = 0, audLastReport = 0, audDrop = 0, audBad = 0;
 
 // =====================================================================
 // IRQ
@@ -229,7 +229,11 @@ static void beginRampDown(State next) {
 // =====================================================================
 // reporting
 // =====================================================================
+void invAudioBadFrame() { audBad++; }
+
 void invReport() {
+  // while streaming audio, skip status lines the host has no room for (do not stall reception)
+  if (state == S_AUDIO && Serial.availableForWrite() < 320) return;
   uint32_t theta = isrTheta;
   String line = "OK INV state=";
   line += STATE_NAMES[state];
@@ -248,6 +252,7 @@ void invReport() {
   line += " dmin=";      line += String(dmin * 100.0, 2);
   line += " accel=";     line += String(accel, 1);
   line += " mlim=";      line += String(mLimit, 2);
+  line += " abad=";      line += audBad;
   if (state == S_DC) {
     line += " dcleft=";
     line += String(((int32_t)(dcDeadline - millis())) / 1000.0, 1);
@@ -372,9 +377,11 @@ void invPoll() {
       if (ms - audLastReport >= AUD_REPORT_MS) {
         audLastReport = ms;
         uint32_t fill = audW - audR;
-        Serial.printf("AUD fill=%lu free=%lu under=%lu drop=%lu\n", (unsigned long)fill,
-                      (unsigned long)(RING_SIZE - 1 - fill), (unsigned long)audUnder,
-                      (unsigned long)audDrop);
+        // never block here: if the host is not reading, a blocked print would stall frame reception
+        if (Serial.availableForWrite() >= 80)
+          Serial.printf("AUD fill=%lu free=%lu under=%lu drop=%lu bad=%lu\n", (unsigned long)fill,
+                        (unsigned long)(RING_SIZE - 1 - fill), (unsigned long)audUnder,
+                        (unsigned long)audDrop, (unsigned long)audBad);
       }
       // short clip (less than AUDIO_PRIME): play what we have once data stops
       if (!audPlaying && audW - audR >= 2 && ms - audLastData >= 100) audPlaying = true;
@@ -558,7 +565,7 @@ void invHandleCommand() {
     if (fcAct < CARRIER_RATIO * bw) return err("carrier must be >= 8x audio bandwidth");
     if (state != S_IDLE && state != S_AUDIO) return err("not ready (enable / stop first)");
     if (state == S_IDLE) {
-      audW = audR = audFrac = audUnder = audDrop = 0;
+      audW = audR = audFrac = audUnder = audDrop = audBad = 0;
       audPlaying = false;
       audStep = (uint32_t)(fs / fcAct * 4294967296.0);
       audFs = fs;

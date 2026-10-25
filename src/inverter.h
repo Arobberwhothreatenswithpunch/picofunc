@@ -9,6 +9,7 @@ void invPoll();                               // call every loop(): ramps, timeo
 void invHandleCommand();                      // remaining strtok() tokens after "INV"
 void invReport();                             // print "OK INV ..." status line
 void invAudioData(const int16_t *s, size_t n);
+void invAudioBadFrame();                      // damaged audio frame dropped (checksum / length)
 void invOnHostDisconnect();                   // USB DTR dropped -> safe stop
 
 bool invActive();                             // SD is high (switching)

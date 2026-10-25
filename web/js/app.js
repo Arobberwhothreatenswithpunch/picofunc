@@ -401,7 +401,7 @@ function signature(st) {
   let iv = null;
   if (st.inv) {
     const a = st.inv.audio;
-    iv = { ...st.inv, c: st.inv.c.fcAct, audio: a ? [a.name, a.fs, Math.round(a.pos * 4000)] : null };
+    iv = { ...st.inv, c: st.inv.c.fcAct, audio: a ? [a.name, a.fs, Math.round(a.pos * a.dur * 10)] : null };   // 0.1 s 刻み
   }
   return JSON.stringify([st.mode, st.pwm, st.mode === "gen" ? S.wave : null, st.showB, st.probe, st.rc, st.active,
                          iv, st.invView, st.mAll, st.actual, sc.on, sc.trig, sc.meas, sc.stats, sc.fft, sc.h, sc.tpos]);
