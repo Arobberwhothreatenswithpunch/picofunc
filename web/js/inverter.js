@@ -256,6 +256,8 @@ export function createInverter(root, api) {
     if (line.startsWith("AUD ")) {
       const k = kv(line);
       aud.fill = +k.fill; aud.tFill = performance.now(); aud.under = +k.under;
+      // AUD 行が来る = ボードは再生中 (状態行が届かなくても送信を始められるように)
+      if (aud.playing && dev.state !== "AUDIO") dev.state = "AUDIO";
       const pct = Math.min(100, aud.fill / audTarget(aud.fs) * 100);
       aud.bad = +k.bad || 0;
       $(".inv-buf", root).style.width = `${pct}%`;
@@ -379,6 +381,8 @@ export function createInverter(root, api) {
       await convert(aud.file);
     }
     aud.lastRedraw = 0;
+    aud.startAt = performance.now();
+    aud.queried = false;
     aud.sent = 0; aud.fill = 0; aud.tFill = performance.now(); aud.under = 0; aud.playing = true;
     api.send(`INV AUDIO START ${aud.fs} ${aud.bw} ${S.audM.toFixed(3)}`);
     clearInterval(aud.timer);
@@ -395,7 +399,15 @@ export function createInverter(root, api) {
 
   function pump() {
     if (!aud.playing || !api.connected()) return stopAudio(false);
-    if (dev.state !== "AUDIO") return;           // wait for the device to accept START
+    if (dev.state !== "AUDIO") {                // wait for the device to accept START
+      const waited = performance.now() - aud.startAt;
+      if (waited > 1000 && !aud.queried) { aud.queried = true; api.send("INV STATUS"); }
+      if (waited > 3000) {
+        api.toast("再生を開始できませんでした (ボードから AUDIO 状態の応答がありません)", true);
+        stopAudio(true);
+      }
+      return;
+    }
     let est = aud.fill - (performance.now() - aud.tFill) / 1000 * aud.fs;
     for (let k = 0; k < 8 && est < audTarget(aud.fs); k++) {
       if (aud.sent >= aud.pcm.length) {

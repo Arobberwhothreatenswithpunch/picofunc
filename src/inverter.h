@@ -7,7 +7,7 @@
 void invInit(uint32_t sysHz);
 void invPoll();                               // call every loop(): ramps, timeouts, e-stop watch
 void invHandleCommand();                      // remaining strtok() tokens after "INV"
-void invReport();                             // print "OK INV ..." status line
+void invReport(bool optional = false);        // print "OK INV ..." status line (optional: may be skipped while streaming)
 void invAudioData(const int16_t *s, size_t n);
 void invAudioBadFrame();                      // damaged audio frame dropped (checksum / length)
 void invOnHostDisconnect();                   // USB DTR dropped -> safe stop

@@ -1,7 +1,7 @@
 // オフライン用キャッシュ。ファイルを更新したら VERSION を上げる
 // 同じ github.io ドメインの他アプリとキャッシュを共有するため、名前に接頭辞を付けて自分の分だけ消す
 const PREFIX = "fgen-";
-const VERSION = PREFIX + "v10";
+const VERSION = PREFIX + "v11";
 const FILES = [
   "./", "index.html", "manifest.webmanifest",
   "js/app.js", "js/sim.js", "js/scope.js", "js/transport.js", "js/inverter.js",

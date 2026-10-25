@@ -231,9 +231,13 @@ static void beginRampDown(State next) {
 // =====================================================================
 void invAudioBadFrame() { audBad++; }
 
-void invReport() {
-  // while streaming audio, skip status lines the host has no room for (do not stall reception)
-  if (state == S_AUDIO && Serial.availableForWrite() < 320) return;
+// USB CDC TX buffer is only 256 bytes (CFG_TUD_CDC_TX_BUFSIZE), smaller than one status line,
+// so "is there room for the whole line" can never be true. Instead, skip only when the host is
+// clearly not reading (buffer almost full) and only for optional lines (periodic INV STATUS polls).
+#define TX_BACKLOG_MIN  128
+
+void invReport(bool optional) {
+  if (optional && state == S_AUDIO && Serial.availableForWrite() < TX_BACKLOG_MIN) return;
   uint32_t theta = isrTheta;
   String line = "OK INV state=";
   line += STATE_NAMES[state];
@@ -436,7 +440,7 @@ static bool num(char *t, double &out) {
 void invHandleCommand() {
   char *sub = tok();
   if (!sub || !strcmp(sub, "STATUS")) {
-    invReport();
+    invReport(true);                // periodic poll: may be skipped while streaming
     return;
   }
 
